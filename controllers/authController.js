@@ -65,7 +65,7 @@ async function loginUser(req, res) {
         success: false,
         message: 'Your account is not active. Please contact support.',
         data: null,
-      });
+      }); //test
     }
 
     const isCorrect = await bcrypt.compare(password, user.password || '');
