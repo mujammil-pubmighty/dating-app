@@ -113,7 +113,7 @@ async function loginUser(req, res) {
 
 async function forgotPassword(req, res) {
   try {
-    console.log("🔔 [forgotPassword] Request body:", req.body);
+    console.log("[forgotPassword] Request body:", req.body);
 
     // 1) Validate body
     const forgotPasswordSchema = Joi.object({
@@ -130,7 +130,7 @@ async function forgotPassword(req, res) {
     });
 
     if (error) {
-      console.log("❌ [forgotPassword] Validation error:", error.details[0].message);
+      console.log("[forgotPassword] Validation error:", error.details[0].message);
 
       return res.status(400).json({
         success: false,
@@ -154,7 +154,7 @@ async function forgotPassword(req, res) {
       });
     }
 
-    console.log("✅ [forgotPassword] User found:", {
+    console.log(" [forgotPassword] User found:", {
       id: user.id,
       email: user.email,
       auth_provider: user.auth_provider,
@@ -162,7 +162,7 @@ async function forgotPassword(req, res) {
 
     // 3) Block Google-only account
     if (user.auth_provider === "google" && !user.password) {
-      console.log("⛔ [forgotPassword] Google-only account, cannot reset password via email+password.");
+      console.log(" [forgotPassword] Google-only account, cannot reset password via email+password.");
 
       return res.status(400).json({
         success: false,
@@ -180,7 +180,7 @@ async function forgotPassword(req, res) {
       Date.now() + OTP_VALID_MINUTES * 60 * 1000
     );
 
-    console.log("🧮 [forgotPassword] Generated OTP:", otp, "Expires at:", otpExpiration);
+    console.log(" [forgotPassword] Generated OTP:", otp, "Expires at:", otpExpiration);
 
     // 6) Save OTP
     const otpRow = await UserOTP.create({
@@ -191,7 +191,7 @@ async function forgotPassword(req, res) {
       status: 0,
     });
 
-    console.log("💾 [forgotPassword] OTP saved in DB with id:", otpRow.id);
+    console.log(" [forgotPassword] OTP saved in DB with id:", otpRow.id);
 
     // 7) Send email (with try/catch so we see SMTP errors)
     try {
@@ -208,15 +208,15 @@ async function forgotPassword(req, res) {
         `,
       });
 
-      console.log("📧 [forgotPassword] OTP email successfully sent to:", user.email);
+      console.log(" [forgotPassword] OTP email successfully sent to:", user.email);
     } catch (mailErr) {
-      console.error("💥 [forgotPassword] Error sending email:", mailErr);
+      console.error(" [forgotPassword] Error sending email:", mailErr);
       // But still respond OK to avoid leaking info
     }
 
     // Always log OTP in console during dev so you can test even if email fails
     console.log(
-      `📌 [DEV] Forgot password OTP for ${user.email} is: ${otp}`
+      `[DEV] Forgot password OTP for ${user.email} is: ${otp}`
     );
 
     return res.status(200).json({
@@ -225,7 +225,7 @@ async function forgotPassword(req, res) {
       action: "forgot_password",
     });
   } catch (error) {
-    console.error("🔥 Error during forgotPassword:", error);
+    console.error(" Error during forgotPassword:", error);
     return res.status(500).json({
       success: false,
       message: "Internal server error",
