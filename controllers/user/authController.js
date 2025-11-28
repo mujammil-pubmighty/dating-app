@@ -1,4 +1,4 @@
-// controllers/authController.js
+
 const Joi = require("joi");
 const bcrypt = require("bcryptjs");
 const User = require("../../models/User");

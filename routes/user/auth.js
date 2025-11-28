@@ -2,6 +2,9 @@ const express = require("express");
 const router = express.Router();
 
 const authController = require("../../controllers/user/authController");
+const utilController = require("../../config/utilController");
+
+router.get("/setting", utilController.getAllOptions);
 
 router.post("/register/google", authController.registerWithEmail);
 router.post("/register", authController.registerUser);
