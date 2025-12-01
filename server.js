@@ -2,7 +2,7 @@ const express = require("express");
 const sequelize = require("./config/db");
 
 const userRoutes = require("./routes/user/auth");
-
+const {setupAssociations}=require("./models/Associations")
 require("dotenv").config();
 
 const app = express();
@@ -22,7 +22,7 @@ app.use("/v1/user", userRoutes);
   try {
     await sequelize.authenticate();
     await sequelize.sync({ alter: false });
-
+    setupAssociations();
     app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
   } catch (e) {
     console.error("DB init error:", e);
