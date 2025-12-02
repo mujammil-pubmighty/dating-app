@@ -4,12 +4,32 @@ const sequelize = require("../../config/db");
 const User = require("../../models/User");
 const UserInteraction = require("../../models/UserInteraction");
 const UserSession = require("../../models/UserSession");
+const {
+  getOption,
+  isUserSessionValid,
+  getDobRangeFromAges,
+} = require("../../utils/helper");
+
+function extractUserIdFromSession(sessionResult) {
+  if (!sessionResult) return null;
+  const raw =
+    sessionResult.user_id ??
+    sessionResult.userId ??
+    sessionResult.data?.user_id ??
+    sessionResult.data?.userId ??
+      sessionResult.data ??    
+    sessionResult.user?.id;
+
+  if (raw == null) return null;
+
+  const num = Number(raw);
+  return Number.isNaN(num) ? null : num;
+}
 
 async function likeUser(req, res) {
   const transaction = await sequelize.transaction();
 
   try {
-    // 1) Validate body (only target_user_id)
     const schema = Joi.object({
       target_user_id: Joi.number().integer().required(),
     });
@@ -25,9 +45,21 @@ async function likeUser(req, res) {
     }
 
     const isSessionValid = await isUserSessionValid(req);
-    if (!isSessionValid.success) return res.status(401).json(isSessionValid);
+if (!isSessionValid.success) {
+  await transaction.rollback();
+  return res.status(401).json(isSessionValid);
+}
 
-    const userId = Number(isSessionValid.user_id);
+const userId = Number(isSessionValid.data);
+
+if (!userId || Number.isNaN(userId)) {
+  await transaction.rollback();
+  return res.status(401).json({
+    success: false,
+    message: "Invalid session: user_id missing.",
+  });
+}
+
     const { target_user_id: targetUserId } = value;
 
     if (userId === Number(targetUserId)) {
@@ -37,8 +69,6 @@ async function likeUser(req, res) {
         message: "You cannot like yourself.",
       });
     }
-
-    // 4) Target must be an active BOT
     const targetUser = await User.findByPk(targetUserId, { transaction });
 
     if (!targetUser || !targetUser.is_active) {
@@ -57,7 +87,7 @@ async function likeUser(req, res) {
       });
     }
 
-    // 5) Save/overwrite interaction as 'like'
+    // Save/overwrite interaction as 'like'
     await UserInteraction.upsert(
       {
         user_id: userId,
@@ -68,7 +98,7 @@ async function likeUser(req, res) {
       { transaction }
     );
 
-    // 6) Increment total_likes for user
+    // Increment total_likes for user
     await User.increment(
       { total_likes: 1 },
       { where: { id: userId }, transaction }
@@ -93,13 +123,13 @@ async function likeUser(req, res) {
       message: "Failed to like bot.",
     });
   }
-} //
+}
 
 async function rejectUser(req, res) {
   const transaction = await sequelize.transaction();
 
   try {
-    // 1) Validate body
+    //  Validate body
     const schema = Joi.object({
       target_user_id: Joi.number().integer().required(),
     });
@@ -116,12 +146,22 @@ async function rejectUser(req, res) {
 
     const { target_user_id: targetUserId } = value;
 
-    // 2) Get user from BEARER token → UserSession table
+    // Get user from BEARER token → UserSession table
+   const isSessionValid = await isUserSessionValid(req);
+if (!isSessionValid.success) {
+  await transaction.rollback();
+  return res.status(401).json(isSessionValid);
+}
 
-    const isSessionValid = await isUserSessionValid(req);
-    if (!isSessionValid.success) return res.status(401).json(isSessionValid);
+const userId = Number(isSessionValid.data);
 
-    const userId = isSessionValid.user_id;
+if (!userId || Number.isNaN(userId)) {
+  await transaction.rollback();
+  return res.status(401).json({
+    success: false,
+    message: "Invalid session: user_id missing.",
+  });
+}
 
     if (Number(userId) === Number(targetUserId)) {
       await transaction.rollback();
@@ -131,7 +171,7 @@ async function rejectUser(req, res) {
       });
     }
 
-    // 3) Target must be an active bot
+    // Target must be an active bot
     const targetUser = await User.findByPk(targetUserId, { transaction });
 
     if (!targetUser || !targetUser.is_active) {
@@ -150,7 +190,7 @@ async function rejectUser(req, res) {
       });
     }
 
-    // 4) Save/overwrite interaction as 'reject'
+    // Save/overwrite interaction as 'reject'
     await UserInteraction.upsert(
       {
         user_id: userId,
@@ -161,7 +201,7 @@ async function rejectUser(req, res) {
       { transaction }
     );
 
-    // 5) Increment total_rejects
+    // Increment total_rejects
     await User.increment(
       { total_rejects: 1 },
       { where: { id: userId }, transaction }
@@ -192,7 +232,7 @@ async function matchUser(req, res) {
   const transaction = await sequelize.transaction();
 
   try {
-    // 1) Validate body
+    //  Validate body
     const schema = Joi.object({
       target_user_id: Joi.number().integer().required(),
     });
@@ -209,10 +249,22 @@ async function matchUser(req, res) {
 
     const { target_user_id: targetUserId } = value;
 
+    // Validate session
     const isSessionValid = await isUserSessionValid(req);
-    if (!isSessionValid.success) return res.status(401).json(isSessionValid);
+    if (!isSessionValid.success) {
+      await transaction.rollback();
+      return res.status(401).json(isSessionValid);
+    }
 
-    const userId = isSessionValid.user_id;
+    const userId = extractUserIdFromSession(isSessionValid);
+
+    if (!userId) {
+      await transaction.rollback();
+      return res.status(401).json({
+        success: false,
+        message: "Invalid session: user_id missing.",
+      });
+    }
 
     if (Number(userId) === Number(targetUserId)) {
       await transaction.rollback();
@@ -222,7 +274,7 @@ async function matchUser(req, res) {
       });
     }
 
-    // 3) Target must be an active BOT
+    //  Target must be an active BOT
     const targetUser = await User.findByPk(targetUserId, { transaction });
 
     if (!targetUser || !targetUser.is_active) {
@@ -241,10 +293,10 @@ async function matchUser(req, res) {
       });
     }
 
-    // 4) Create mutual match interactions (user ↔ bot)
+    // Create mutual match interactions (user ↔ bot)
     await makeMutualMatch(userId, targetUserId, transaction);
 
-    // 5) (Later) create chat + first bot message here
+    // (Later) create chat + first bot message here
 
     await transaction.commit();
 
@@ -268,7 +320,14 @@ async function matchUser(req, res) {
 }
 
 async function makeMutualMatch(userId, botId, transaction) {
-  // 1) Check if mutual match already exists (user -> bot)
+  // Extra safety: don't let undefined slip in
+  if (!userId || !botId) {
+    throw new Error(
+      `makeMutualMatch called with invalid IDs. userId=${userId}, botId=${botId}`
+    );
+  }
+
+  //  Check if mutual match already exists (user -> bot)
   const existing = await UserInteraction.findOne({
     where: {
       user_id: userId,
@@ -283,8 +342,7 @@ async function makeMutualMatch(userId, botId, transaction) {
   if (existing) {
     return { newlyCreated: false };
   }
-
-  // 2) Create / overwrite user -> bot
+  //  Create / overwrite user -> bot
   await UserInteraction.upsert(
     {
       user_id: userId,
@@ -295,7 +353,7 @@ async function makeMutualMatch(userId, botId, transaction) {
     { transaction }
   );
 
-  // 3) Create / overwrite bot -> user (virtual “bot said yes”)
+  //  Create / overwrite bot -> user (virtual “bot said yes”)
   await UserInteraction.upsert(
     {
       user_id: botId,
@@ -306,7 +364,7 @@ async function makeMutualMatch(userId, botId, transaction) {
     { transaction }
   );
 
-  // 4) Increment total_matches for both (only once per new mutual match)
+  // Increment total_matches for both (only once per new mutual match)
   await User.increment(
     { total_matches: 1 },
     { where: { id: userId }, transaction }
