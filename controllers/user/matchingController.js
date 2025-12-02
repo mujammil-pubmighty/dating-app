@@ -133,9 +133,8 @@ async function likeUser(req, res) {
 
     return res.status(200).json({
       success: true,
-      message: "Bot liked.",
+      message: "liked",
       data: {
-        action: "like",
         target_user_id: targetUserId,
         target_type: targetUser.type, // 'bot'
         is_match: true, // for bots we treat like = match
