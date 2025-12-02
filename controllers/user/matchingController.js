@@ -259,9 +259,8 @@ async function rejectUser(req, res) {
 
     return res.status(200).json({
       success: true,
-      message: "Bot rejected.",
+      message: "reject",
       data: {
-        action: "reject",
         target_user_id: targetUserId,
         target_type: targetUser.type,
       },
