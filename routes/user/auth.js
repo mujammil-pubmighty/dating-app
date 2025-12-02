@@ -8,6 +8,7 @@ const userController = require("../../controllers/user/userController");
 
 router.get("/setting", utilController.getAllOptions);
 
+//user auth {register, login}
 router.post("/register/google", authController.registerWithEmail);
 router.post("/register", authController.registerUser);
 router.post("/register/verify", authController.verifyRegister);
@@ -15,6 +16,7 @@ router.post("/login", authController.loginUser);
 router.post("/forgot-password", authController.forgotPassword);
 router.post("/forgot-password/verify", authController.forgotPasswordVerify);
 
+//user interaction {like, reject, match}
 router.post("/like", matchingController.likeUser);
 router.post("/reject", matchingController.rejectUser);
 router.post("/match", matchingController.matchUser);
@@ -27,5 +29,6 @@ router.get("/persons", userController.getAllPersons);
 router.get("/persons/random", userController.getRandomPersons);
 router.get("/persons/recommended", userController.getRecommendedPersons);
 router.get("/persons/:id", userController.getPersonById);
+
 
 module.exports = router;

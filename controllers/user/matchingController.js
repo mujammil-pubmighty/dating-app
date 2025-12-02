@@ -3,13 +3,8 @@ const Joi = require("joi");
 const sequelize = require("../../config/db");
 const User = require("../../models/User");
 const UserInteraction = require("../../models/UserInteraction");
-const UserSession = require("../../models/UserSession");
-const {
-  getOption,
-  isUserSessionValid,
-  getDobRangeFromAges,
-} = require("../../utils/helper");
-
+const {getOption,isUserSessionValid,getOrCreateChatBetweenUsers,} = require("../../utils/helper");
+const Chats = require("../../models/chats");
 function extractUserIdFromSession(sessionResult) {
   if (!sessionResult) return null;
   const raw =
@@ -45,20 +40,20 @@ async function likeUser(req, res) {
     }
 
     const isSessionValid = await isUserSessionValid(req);
-if (!isSessionValid.success) {
-  await transaction.rollback();
-  return res.status(401).json(isSessionValid);
-}
+    if (!isSessionValid.success) {
+      await transaction.rollback();
+      return res.status(401).json(isSessionValid);
+    }
 
-const userId = Number(isSessionValid.data);
+    const userId = Number(isSessionValid.data);
 
-if (!userId || Number.isNaN(userId)) {
-  await transaction.rollback();
-  return res.status(401).json({
-    success: false,
-    message: "Invalid session: user_id missing.",
-  });
-}
+    if (!userId || Number.isNaN(userId)) {
+      await transaction.rollback();
+      return res.status(401).json({
+        success: false,
+        message: "Invalid session: user_id missing.",
+      });
+    }
 
     const { target_user_id: targetUserId } = value;
 
@@ -69,6 +64,7 @@ if (!userId || Number.isNaN(userId)) {
         message: "You cannot like yourself.",
       });
     }
+
     const targetUser = await User.findByPk(targetUserId, { transaction });
 
     if (!targetUser || !targetUser.is_active) {
@@ -87,21 +83,50 @@ if (!userId || Number.isNaN(userId)) {
       });
     }
 
-    // Save/overwrite interaction as 'like'
+    // ---- Check existing interaction ----
+    const existingInteraction = await UserInteraction.findOne({
+      where: {
+        user_id: userId,
+        target_user_id: targetUserId,
+      },
+      transaction,
+    });
+
+    const previousAction = existingInteraction ? existingInteraction.action : null;
+  
     await UserInteraction.upsert(
       {
         user_id: userId,
         target_user_id: targetUserId,
         action: "like",
-        is_mutual: false,
+        is_mutual: true, // user↔bot as instant mutual
       },
       { transaction }
     );
 
-    // Increment total_likes for user
-    await User.increment(
-      { total_likes: 1 },
-      { where: { id: userId }, transaction }
+    if (previousAction === "like") {
+      // Already liked before → no change
+   //   console.log("[likeUser] already liked, no counter change");
+    } else if (previousAction === "reject") {
+      // REJECT -> LIKE  → likes +1, rejects -1
+    //  console.log("[likeUser] REJECT -> LIKE, +1 like, -1 reject");
+      await User.increment(
+        { total_likes: 1, total_rejects: -1 },
+        { where: { id: userId }, transaction }
+      );
+    } else {
+      // First time interaction → like +1
+     // console.log("[likeUser] first LIKE, +1 like");
+      await User.increment(
+        { total_likes: 1 },
+        { where: { id: userId }, transaction }
+      );
+    }
+
+    const chat = await getOrCreateChatBetweenUsers(
+      userId,
+      targetUserId,
+      transaction
     );
 
     await transaction.commit();
@@ -113,6 +138,8 @@ if (!userId || Number.isNaN(userId)) {
         action: "like",
         target_user_id: targetUserId,
         target_type: targetUser.type, // 'bot'
+        is_match: true, // for bots we treat like = match
+        chat_id: chat.id,
       },
     });
   } catch (err) {
@@ -129,7 +156,6 @@ async function rejectUser(req, res) {
   const transaction = await sequelize.transaction();
 
   try {
-    //  Validate body
     const schema = Joi.object({
       target_user_id: Joi.number().integer().required(),
     });
@@ -146,22 +172,21 @@ async function rejectUser(req, res) {
 
     const { target_user_id: targetUserId } = value;
 
-    // Get user from BEARER token → UserSession table
-   const isSessionValid = await isUserSessionValid(req);
-if (!isSessionValid.success) {
-  await transaction.rollback();
-  return res.status(401).json(isSessionValid);
-}
+    const isSessionValid = await isUserSessionValid(req);
+    if (!isSessionValid.success) {
+      await transaction.rollback();
+      return res.status(401).json(isSessionValid);
+    }
 
-const userId = Number(isSessionValid.data);
+    const userId = Number(isSessionValid.data);
 
-if (!userId || Number.isNaN(userId)) {
-  await transaction.rollback();
-  return res.status(401).json({
-    success: false,
-    message: "Invalid session: user_id missing.",
-  });
-}
+    if (!userId || Number.isNaN(userId)) {
+      await transaction.rollback();
+      return res.status(401).json({
+        success: false,
+        message: "Invalid session: user_id missing.",
+      });
+    }
 
     if (Number(userId) === Number(targetUserId)) {
       await transaction.rollback();
@@ -171,7 +196,6 @@ if (!userId || Number.isNaN(userId)) {
       });
     }
 
-    // Target must be an active bot
     const targetUser = await User.findByPk(targetUserId, { transaction });
 
     if (!targetUser || !targetUser.is_active) {
@@ -190,6 +214,17 @@ if (!userId || Number.isNaN(userId)) {
       });
     }
 
+    // ---- Check existing interaction ----
+    const existingInteraction = await UserInteraction.findOne({
+      where: {
+        user_id: userId,
+        target_user_id: targetUserId,
+      },
+      transaction,
+    });
+
+    const previousAction = existingInteraction ? existingInteraction.action : null;
+   
     // Save/overwrite interaction as 'reject'
     await UserInteraction.upsert(
       {
@@ -201,11 +236,24 @@ if (!userId || Number.isNaN(userId)) {
       { transaction }
     );
 
-    // Increment total_rejects
-    await User.increment(
-      { total_rejects: 1 },
-      { where: { id: userId }, transaction }
-    );
+    // ---- Update counters based on previous action ----
+    if (previousAction === "like") {
+      // LIKE -> REJECT → likes -1, rejects +1
+      await User.increment(
+        { total_likes: -1, total_rejects: 1 },
+        { where: { id: userId }, transaction }
+      );
+    } else if (previousAction === "reject") {
+      // Already rejected → no change
+      //console.log("[rejectUser] already rejected, no counter change");
+    } else {
+      // First interaction is reject → rejects +1
+     // console.log("[rejectUser] first REJECT, +1 reject");
+      await User.increment(
+        { total_rejects: 1 },
+        { where: { id: userId }, transaction }
+      );
+    }
 
     await transaction.commit();
 
@@ -377,6 +425,7 @@ async function makeMutualMatch(userId, botId, transaction) {
 
   return { newlyCreated: true };
 }
+
 
 module.exports = {
   likeUser,

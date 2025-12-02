@@ -1,6 +1,7 @@
 
 const User = require("./User");
 const UserInteraction = require("./UserInteraction");
+const Chats= require("./chats");
 
 function setupAssociations() {
 
@@ -31,6 +32,28 @@ function setupAssociations() {
     onDelete: "CASCADE",
     onUpdate: "CASCADE",
   });
+  Chats.belongsTo(User, {
+    as: "participant1",
+    foreignKey: "participant1Id",
+    onDelete: "CASCADE",
+  });
+
+  Chats.belongsTo(User, {
+    as: "participant2",
+    foreignKey: "participant2Id",
+    onDelete: "CASCADE",
+  });
+
+  User.hasMany(Chats, {
+    as: "chatsAsParticipant1",
+    foreignKey: "participant1Id",
+  });
+
+  User.hasMany(Chats, {
+    as: "chatsAsParticipant2",
+    foreignKey: "participant2Id",
+  });
+
 }
 
 module.exports ={ setupAssociations};

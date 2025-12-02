@@ -6,6 +6,7 @@ const geoip = require("geoip-lite");
 const maxmind = require("maxmind");
 const { Op } = require("sequelize");
 const { transporter } = require("../config/mail");
+const Chat = require("../models/chats");
 
 const { returnMailTemplate } = require("./helpers/mailUIHelper");
 const UAParser = require("ua-parser-js");
@@ -363,6 +364,38 @@ function getDobRangeFromAges(minAge, maxAge) {
     maxDob: youngestDob,
   };
 }
+function normalizeParticipants(userIdA, userIdB) {
+  const id1 = Number(userIdA);
+  const id2 = Number(userIdB);
+
+  if (id1 === id2) {
+    throw new Error("Cannot create chat with the same user");
+  }
+
+  return id1 < id2
+    ? { participant1Id: id1, participant2Id: id2 }
+    : { participant1Id: id2, participant2Id: id1 };
+}
+
+async function getOrCreateChatBetweenUsers(userIdA, userIdB, transaction) {
+  const participant1Id = userIdA
+  const participant2Id = userIdB;
+
+  let chat = await Chat.findOne({
+    where: { participant1Id, participant2Id },
+    transaction,
+  });
+
+  if (!chat) {
+    chat = await Chat.create(
+      { participant1Id, participant2Id },
+      { transaction }
+    );
+  }
+
+  return chat;
+}
+
 module.exports = {
   getRealIp,
   getOption,
@@ -378,4 +411,5 @@ module.exports = {
   sendOtpMail,
   isUserSessionValid,
   getDobRangeFromAges,
+  getOrCreateChatBetweenUsers,
 };
