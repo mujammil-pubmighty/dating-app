@@ -849,6 +849,7 @@ async function changePassword(req, res) {
     });
   }
 }
+
 module.exports = {
   getPackage,
   getAllPersons,

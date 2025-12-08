@@ -83,10 +83,12 @@ const User = sequelize.define(
        type: DataTypes.STRING(100),
     },
     looking: {
-      type: DataTypes.ENUM("Long Term Relationship",
-         "Long Term,Open To Short Term Relationship",
-          "Short Term,Open To Long Term Relationship", 
-          "Short Term Fun","New Friends","Still Figuring Out"),
+      type: DataTypes.ENUM("Long Term",
+         "Long Term, Open To Short",
+          "Short Term, Open To Long", 
+          "Short Term Fun",
+          "New Friends",
+          "Still Figuring Out"),
       allowNull: true,
     },
     coins: {
