@@ -9,7 +9,8 @@ const {
   isUserSessionValid,
   getDobRangeFromAges,
 } = require("../../utils/helper");
-
+const { fileUploader, uploadImage, verifyFileType, deleteFile, cleanupTempFiles
+}= require("../../utils/helpers/fileUpload");
 const { Op } = require("sequelize");
 
 async function getPackage(req, res) {
@@ -549,16 +550,17 @@ async function updateUserProfile(req, res) {
           "Still Figuring Out"
         )
         .optional()
-        .allow(null, ""),
+        .allow(null, "")
     }).min(1);
 
-    // 1) Validate body
+    // Validate body
     const { error, value } = updateProfileSchema.validate(req.body, {
       abortEarly: true,
       stripUnknown: true,
     });
 
     if (error) {
+      if (req.file) await cleanupTempFiles([req.file]);
       await transaction.rollback();
       return res.status(400).json({
         success: false,
@@ -566,19 +568,21 @@ async function updateUserProfile(req, res) {
       });
     }
 
-    // 2) Check session
+    // Check session
     const sessionResult = await isUserSessionValid(req);
     if (!sessionResult.success) {
+      if (req.file) await cleanupTempFiles([req.file]);
       await transaction.rollback();
       return res.status(401).json(sessionResult);
     }
 
     const userId = Number(sessionResult.data);
 
-    // 3) Load current user
+    // Load current user
     const user = await User.findByPk(userId, { transaction });
 
     if (!user) {
+      if (req.file) await cleanupTempFiles([req.file]);
       await transaction.rollback();
       return res.status(404).json({
         success: false,
@@ -586,7 +590,34 @@ async function updateUserProfile(req, res) {
       });
     }
 
-    // 4) Unique checks
+    const oldAvatar = user.avatar;
+    let newAvatarFilename = null;
+
+    // Handle avatar file upload
+    if (req.file) {
+      const verifyResult = await verifyFileType(req.file, [
+        "image/png",
+        "image/jpeg",
+        "image/jpg",
+        "image/webp",
+        "image/heic",
+        "image/heif",
+      ]);
+
+      if (!verifyResult || !verifyResult.ok) {
+        await cleanupTempFiles([req.file]);
+        await transaction.rollback();
+        return res.status(400).json({
+          success: false,
+          message: "Invalid avatar file type. Please upload a valid image.",
+        });
+      }
+
+      newAvatarFilename = await uploadImage(req.file, "upload/avatar");
+      value.avatar = newAvatarFilename;
+    }
+
+    // Unique checks
     if (value.username && value.username !== user.username) {
       const existingUsername = await User.findOne({
         where: { username: value.username },
@@ -594,6 +625,7 @@ async function updateUserProfile(req, res) {
       });
 
       if (existingUsername) {
+        if (req.file) await cleanupTempFiles([req.file]);
         await transaction.rollback();
         return res.status(409).json({
           success: false,
@@ -603,8 +635,8 @@ async function updateUserProfile(req, res) {
     }
 
     if (
-      typeof value.email !== "undefined" && // email provided (can be null or empty)
-      value.email && // not empty string
+      typeof value.email !== "undefined" &&
+      value.email &&
       value.email !== user.email
     ) {
       const existingEmail = await User.findOne({
@@ -613,6 +645,7 @@ async function updateUserProfile(req, res) {
       });
 
       if (existingEmail) {
+        if (req.file) await cleanupTempFiles([req.file]);
         await transaction.rollback();
         return res.status(409).json({
           success: false,
@@ -650,12 +683,19 @@ async function updateUserProfile(req, res) {
     // Update timestamp
     updates.updated_at = new Date();
 
-    // 5) Apply update
+    // Apply update
     await user.update(updates, { transaction });
 
     await transaction.commit();
 
-    // 6) Return updated user (hide password)
+    if (req.file) await cleanupTempFiles([req.file]).catch(() => {});
+
+    // Delete old avatar after successful update
+    if (newAvatarFilename && oldAvatar && oldAvatar !== newAvatarFilename) {
+      deleteFile(oldAvatar, "upload/avatar").catch(() => {});
+    }
+
+    // Return updated user (hide password)
     const safeUser = {
       id: user.id,
       username: user.username,
@@ -691,6 +731,7 @@ async function updateUserProfile(req, res) {
     });
   } catch (err) {
     console.error("[updateUserProfile] Error:", err);
+    if (req.file) await cleanupTempFiles([req.file]).catch(() => {});
     await transaction.rollback();
     return res.status(500).json({
       success: false,
@@ -698,6 +739,7 @@ async function updateUserProfile(req, res) {
     });
   }
 }
+
 
 
 async function changePassword(req, res) {

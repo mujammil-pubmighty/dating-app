@@ -8,6 +8,8 @@ const userController = require("../../controllers/user/userController");
 
 const adsController=require("../../controllers/user/adViewController")
 
+const { fileUploader } = require("../../utils/helpers/fileUpload");
+
 router.get("/setting", utilController.getAllOptions);
 
 //user auth {register, login}
@@ -32,7 +34,7 @@ router.get("/persons", userController.getAllPersons);
 router.get("/persons/random", userController.getRandomPersons);
 router.get("/persons/recommended", userController.getRecommendedPersons);
 router.get("/persons/:id", userController.getPersonById);
-router.post("/profile", userController.updateUserProfile);
+router.post("/profile",  fileUploader.single("avatar"), userController.updateUserProfile);
 
 //ads view 
 router.get("/ads/status",adsController.getAdStatus);
