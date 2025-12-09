@@ -4,14 +4,10 @@ const sequelize = require("../../config/db");
 const CoinPackage = require("../../models/CoinPackage");
 const User = require("../../models/User");
 const UserSetting = require("../../models/UserSetting");
-const {
-  getOption,
-  isUserSessionValid,
-  getDobRangeFromAges,
-} = require("../../utils/helper");
-const { fileUploader, uploadImage, verifyFileType, deleteFile, cleanupTempFiles
-}= require("../../utils/helpers/fileUpload");
+const { getOption, isUserSessionValid, getDobRangeFromAges} = require("../../utils/helper");
+const { fileUploader, uploadImage, verifyFileType, deleteFile, cleanupTempFiles }= require("../../utils/helpers/fileUpload");
 const { Op } = require("sequelize");
+const { compressImage } = require("../../utils/helpers/imageCompressor");
 
 async function getPackage(req, res) {
   try {
@@ -593,29 +589,29 @@ async function updateUserProfile(req, res) {
     const oldAvatar = user.avatar;
     let newAvatarFilename = null;
 
-    // Handle avatar file upload
-    if (req.file) {
-      const verifyResult = await verifyFileType(req.file, [
-        "image/png",
-        "image/jpeg",
-        "image/jpg",
-        "image/webp",
-        "image/heic",
-        "image/heif",
-      ]);
+   
+if (req.file) {
+  const verifyResult = await verifyFileType(req.file, [
+    "image/png",
+    "image/jpeg",
+    "image/jpg",
+    "image/webp",
+    "image/heic",
+    "image/heif",
+  ]);
 
-      if (!verifyResult || !verifyResult.ok) {
-        await cleanupTempFiles([req.file]);
-        await transaction.rollback();
-        return res.status(400).json({
-          success: false,
-          message: "Invalid avatar file type. Please upload a valid image.",
-        });
-      }
+  if (!verifyResult || !verifyResult.ok) {
+    await cleanupTempFiles([req.file]);
+    await transaction.rollback();
+    return res.status(400).json({
+      success: false,
+      message: "Invalid avatar file type.",
+    });
+  }
 
-      newAvatarFilename = await uploadImage(req.file, "upload/avatar");
-      value.avatar = newAvatarFilename;
-    }
+  const newAvatar = await compressImage(req.file.path, "upload/avatar");
+  value.avatar = newAvatar;
+}
 
     // Unique checks
     if (value.username && value.username !== user.username) {
