@@ -2,14 +2,11 @@ const Joi = require("joi");
 const sequelize = require("../../config/db");
 const CoinPackage = require("../../models/CoinPackage");
 const User = require("../../models/User");
-
 const UserSetting = require("../../models/UserSetting");
-const {
-  getOption,
-  isUserSessionValid,
-  getDobRangeFromAges,
-} = require("../../utils/helper");
+const { getOption, isUserSessionValid, getDobRangeFromAges} = require("../../utils/helper");
+const { fileUploader, uploadImage, verifyFileType, deleteFile, cleanupTempFiles }= require("../../utils/helpers/fileUpload");
 const { Op } = require("sequelize");
+const { compressImage } = require("../../utils/helpers/imageCompressor");
 
 async function updateUserProfile(req, res) {
   const transaction = await sequelize.transaction();
@@ -787,15 +784,326 @@ async function getRandomPersons(req, res) {
 
 async function getUserSettings(req, res) {
   try {
-    //  Validate session
-    const session = await isUserSessionValid(req);
-    if (!session.success) {
-      return res.status(401).json(session);
+    const updateProfileSchema = Joi.object({
+      username: Joi.string().min(3).max(50).optional(),
+      email: Joi.string().email().max(100).optional().allow(null, ""),
+      phone: Joi.string().max(100).optional().allow(null, ""),
+
+      gender: Joi.string()
+        .valid("male", "female", "other", "prefer_not_to_say")
+        .optional()
+        .allow(null),
+
+      city: Joi.string().max(100).optional().allow(null, ""),
+      state: Joi.string().max(100).optional().allow(null, ""),
+      country: Joi.string().max(100).optional().allow(null, ""),
+      address: Joi.string().optional().allow(null, ""),
+      avatar: Joi.string().max(255).optional().allow(null, ""),
+      dob: Joi.date().iso().optional().allow(null, ""),
+      bio: Joi.string().optional().allow(null, ""),
+      height: Joi.string().max(10).optional(),
+      education: Joi.string().max(100).optional().allow(null, ""),
+      looking: Joi.string()
+        .valid(
+          "Long Term",
+          "Long Term Open To Short",
+          "Short Term Open To Long",
+          "Short Term Fun",
+          "New Friends",
+          "Still Figuring Out"
+        )
+        .optional()
+        .allow(null, "")
+    }).min(1);
+
+    // Validate body
+    const { error, value } = updateProfileSchema.validate(req.body, {
+      abortEarly: true,
+      stripUnknown: true,
+    });
+
+    if (error) {
+      if (req.file) await cleanupTempFiles([req.file]);
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message,
+      });
     }
     const userId = Number(session.data);
 
-    //  Try to find existing settings
-    let settings = await UserSetting.findOne({
+    // Check session
+    const sessionResult = await isUserSessionValid(req);
+    if (!sessionResult.success) {
+      if (req.file) await cleanupTempFiles([req.file]);
+      await transaction.rollback();
+      return res.status(401).json(sessionResult);
+    }
+
+     userId = Number(sessionResult.data);
+
+    // Load current user
+    const user = await User.findByPk(userId, { transaction });
+
+    if (!user) {
+      if (req.file) await cleanupTempFiles([req.file]);
+      await transaction.rollback();
+      return res.status(404).json({
+        success: false,
+        message: "User not found.",
+      });
+    }
+
+    const oldAvatar = user.avatar;
+    let newAvatarFilename = null;
+
+   
+if (req.file) {
+  const verifyResult = await verifyFileType(req.file, [
+    "image/png",
+    "image/jpeg",
+    "image/jpg",
+    "image/webp",
+    "image/heic",
+    "image/heif",
+  ]);
+
+  if (!verifyResult || !verifyResult.ok) {
+    await cleanupTempFiles([req.file]);
+    await transaction.rollback();
+    return res.status(400).json({
+      success: false,
+      message: "Invalid avatar file type.",
+    });
+  }
+
+  const newAvatar = await compressImage(req.file.path, "upload/avatar");
+  value.avatar = newAvatar;
+}
+
+    // Unique checks
+    if (value.username && value.username !== user.username) {
+      const existingUsername = await User.findOne({
+        where: { username: value.username },
+        transaction,
+      });
+
+      if (existingUsername) {
+        if (req.file) await cleanupTempFiles([req.file]);
+        await transaction.rollback();
+        return res.status(409).json({
+          success: false,
+          message: "Username is already taken.",
+        });
+      }
+    }
+
+    if (
+      typeof value.email !== "undefined" &&
+      value.email &&
+      value.email !== user.email
+    ) {
+      const existingEmail = await User.findOne({
+        where: { email: value.email },
+        transaction,
+      });
+
+      if (existingEmail) {
+        if (req.file) await cleanupTempFiles([req.file]);
+        await transaction.rollback();
+        return res.status(409).json({
+          success: false,
+          message: "Email is already taken.",
+        });
+      }
+    }
+
+    const updatableFields = [
+      "username",
+      "email",
+      "phone",
+      "gender",
+      "city",
+      "state",
+      "country",
+      "address",
+      "avatar",
+      "dob",
+      "bio",
+      "height",
+      "education",
+      "looking",
+    ];
+
+    const updates = {};
+
+    for (const key of updatableFields) {
+      if (Object.prototype.hasOwnProperty.call(value, key)) {
+        // Treat empty string as null, like existing behavior
+        updates[key] = value[key] === "" ? null : value[key];
+      }
+    }
+
+    // Update timestamp
+    updates.updated_at = new Date();
+
+    // Apply update
+    await user.update(updates, { transaction });
+
+    await transaction.commit();
+
+    if (req.file) await cleanupTempFiles([req.file]).catch(() => {});
+
+    // Delete old avatar after successful update
+    if (newAvatarFilename && oldAvatar && oldAvatar !== newAvatarFilename) {
+      deleteFile(oldAvatar, "upload/avatar").catch(() => {});
+    }
+  console.log("REQ.FILE:", req.file);
+    // Return updated user (hide password)
+    const safeUser = {
+      id: user.id,
+      username: user.username,
+      email: user.email,
+      phone: user.phone,
+      gender: user.gender,
+      city: user.city,
+      state: user.state,
+      country: user.country,
+      address: user.address,
+      avatar: user.avatar,
+      dob: user.dob,
+      bio: user.bio,
+      height: user.height,
+      education: user.education,
+      looking: user.looking,
+
+      coins: user.coins,
+      total_likes: user.total_likes,
+      total_matches: user.total_matches,
+      total_rejects: user.total_rejects,
+      is_active: user.is_active,
+      is_verified: user.is_verified,
+      last_active: user.last_active,
+      created_at: user.created_at,
+      updated_at: user.updated_at,
+    };
+
+    return res.status(200).json({
+      success: true,
+      message: "Profile updated successfully.",
+      data: safeUser,
+    });
+  } catch (err) {
+    console.error("updateUserProfile Error:", err);
+    if (req.file) await cleanupTempFiles([req.file]).catch(() => {});
+    await transaction.rollback();
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong while updating profile.",
+    });
+  }
+  
+}
+
+
+
+async function changePassword(req, res) {
+  const transaction = await sequelize.transaction();
+
+  try {
+    // 1) Validate body
+    const changePasswordSchema = Joi.object({
+      old_password: Joi.string().min(6).max(255).required(),
+      new_password: Joi.string().min(8).max(255).required(),
+      confirm_password: Joi.string().valid(Joi.ref("new_password")).required(),
+    });
+    const { error, value } = changePasswordSchema.validate(req.body, {
+      abortEarly: true,
+      stripUnknown: true,
+    });
+
+    if (error) {
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message,
+      });
+    }
+
+    const { old_password, new_password } = value;
+
+    // 2) Validate session (user must be logged in)
+    const sessionResult = await isUserSessionValid(req);
+    if (!sessionResult.success) {
+      await transaction.rollback();
+      return res.status(401).json(sessionResult);
+    }
+
+    const userId = Number(sessionResult.data);
+    if (!userId || Number.isNaN(userId)) {
+      await transaction.rollback();
+      return res.status(401).json({
+        success: false,
+        message: "Invalid session.",
+      });
+    }
+
+    // 3) Load user
+    const user = await User.findByPk(userId, { transaction });
+
+    if (!user) {
+      await transaction.rollback();
+      return res.status(404).json({
+        success: false,
+        message: "User not found.",
+      });
+    }
+
+    // Optional: block password change for social login-only users
+    if (user.register_type !== "manual") {
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message:
+          "Password cannot be changed for this account type. Please use your social login.",
+      });
+    }
+
+    // 4) Compare old password
+    const isMatch = await bcrypt.compare(old_password, user.password);
+    if (!isMatch) {
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: "Old password is incorrect.",
+      });
+    }
+
+    // 5) Prevent using same password again
+    const isSame = await bcrypt.compare(new_password, user.password);
+    if (isSame) {
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: "New password must be different from old password.",
+      });
+    }
+
+    // 6) Hash new password
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(new_password, salt);
+
+    // 7) Update password
+    await user.update(
+      {
+        password: hashedPassword,
+        updated_at: new Date(),
+      },
+      { transaction }
+    );
+
+    // 8) Invalidate all active sessions for this user (force re-login everywhere)
+    await UserSession.destroy({
       where: { user_id: userId },
     });
 
