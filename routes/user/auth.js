@@ -1,10 +1,11 @@
 const express = require("express");
 const router = express.Router();
-
+const coinController = require("../../controllers/user/coinController");
 const authController = require("../../controllers/user/authController");
 const utilController = require("../../config/utilController");
 const matchingController = require("../../controllers/user/matchingController");
 const userController = require("../../controllers/user/userController");
+const chatController = require("../../controllers/user/chatController");
 
 const adsController=require("../../controllers/user/adViewController")
 
@@ -20,6 +21,10 @@ router.post("/login", authController.loginUser);
 router.post("/forgot-password", authController.forgotPassword);
 router.post("/forgot-password/verify", authController.forgotPasswordVerify);
 
+router.post("/chats/:chatId/messages", chatController.sendMessage);
+router.get("/chats/:chatId/messages", chatController.getChatMessages);
+router.get("/chats", chatController.getUserChats);
+
 //user interaction {like, reject, match}
 router.post("/like", matchingController.likeUser);
 router.post("/reject", matchingController.rejectUser);
@@ -27,7 +32,8 @@ router.post("/match", matchingController.matchUser);
 router.get("/matches", matchingController.getUserMatches);
 
 //coin
-router.get("/coin-packages", userController.getPackage);
+router.get("/coins/purchases", coinController.getUserCoinPurchases);
+router.get("/coin-packages", userController.getPackages);
 
 //user + bot
 router.get("/persons", userController.getAllPersons);
@@ -40,5 +46,7 @@ router.post("/profile",  fileUploader.single("avatar"), userController.updateUse
 router.get("/ads/status",adsController.getAdStatus);
 router.post("/ads/complete",adsController.completeAdView);
 
+router.get("/settings", userController.getUserSettings);
+router.post("/settings", userController.updateUserSettings);
 
 module.exports = router;

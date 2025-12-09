@@ -6,7 +6,7 @@ const geoip = require("geoip-lite");
 const maxmind = require("maxmind");
 const { Op } = require("sequelize");
 const { transporter } = require("../config/mail");
-const Chat = require("../models/chats");
+const Chat = require("../models/Chat");
 
 const { returnMailTemplate } = require("./helpers/mailUIHelper");
 const UAParser = require("ua-parser-js");
@@ -378,7 +378,7 @@ function normalizeParticipants(userIdA, userIdB) {
 }
 
 async function getOrCreateChatBetweenUsers(userIdA, userIdB, transaction) {
-  const participant1Id = userIdA
+  const participant1Id = userIdA;
   const participant2Id = userIdB;
 
   let chat = await Chat.findOne({

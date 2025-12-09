@@ -8,9 +8,7 @@ const {
   isUserSessionValid,
   getOrCreateChatBetweenUsers,
 } = require("../../utils/helper");
-const Chats = require("../../models/chats");
-
-
+const Chats = require("../../models/Chat");
 
 async function likeUser(req, res) {
   const transaction = await sequelize.transaction();
@@ -66,8 +64,7 @@ async function likeUser(req, res) {
       });
     }
 
-
-
+    // ---- Check existing interaction ----
     const existingInteraction = await UserInteraction.findOne({
       where: {
         user_id: userId,
@@ -91,18 +88,15 @@ async function likeUser(req, res) {
     );
 
     if (previousAction === "like") {
-     
-   //   console.log("[likeUser] already liked, no counter change");
+      //   console.log("[likeUser] already liked, no counter change");
     } else if (previousAction === "reject") {
-      
-    //  console.log("[likeUser] REJECT -> LIKE, +1 like, -1 reject");
+      //  console.log("[likeUser] REJECT -> LIKE, +1 like, -1 reject");
       await User.increment(
         { total_likes: 1, total_rejects: -1 },
         { where: { id: userId }, transaction }
       );
     } else {
-     
-     // console.log("[likeUser] first LIKE, +1 like");
+      // console.log("[likeUser] first LIKE, +1 like");
       await User.increment(
         { total_likes: 1 },
         { where: { id: userId }, transaction }
@@ -124,7 +118,7 @@ async function likeUser(req, res) {
         target_user_id: targetUserId,
         target_type: targetUser.type, // 'bot'
         is_match: true, // for bots we treat like = match
-     //   chat_id: chat.id,
+        //   chat_id: chat.id,
       },
     });
   } catch (err) {
@@ -199,7 +193,6 @@ async function rejectUser(req, res) {
       });
     }
 
-    
     // ---- Check existing interaction ----
     const existingInteraction = await UserInteraction.findOne({
       where: {
@@ -224,14 +217,12 @@ async function rejectUser(req, res) {
       { transaction }
     );
 
-   if (previousAction === "like" || previousAction === "match") {
-      
+    if (previousAction === "like" || previousAction === "match") {
       await User.increment(
         { total_likes: -1, total_rejects: 1 },
         { where: { id: userId }, transaction }
       );
     } else if (previousAction === "reject") {
-      
     } else {
       await User.increment(
         { total_rejects: 1 },
@@ -331,18 +322,17 @@ async function matchUser(req, res) {
       transaction,
     });
 
-    const previousAction = existingInteraction ? existingInteraction.action : null;
+    const previousAction = existingInteraction
+      ? existingInteraction.action
+      : null;
 
     if (previousAction === "like" || previousAction === "match") {
-   
     } else if (previousAction === "reject") {
-     
       await User.increment(
         { total_likes: 1, total_rejects: -1 },
         { where: { id: userId }, transaction }
       );
     } else {
-   
       await User.increment(
         { total_likes: 1 },
         { where: { id: userId }, transaction }
@@ -374,7 +364,6 @@ async function matchUser(req, res) {
         target_user_id: targetUserId,
         target_type: "bot",
         is_new_match: newlyCreated,
-    
       },
     });
   } catch (err) {
@@ -410,7 +399,7 @@ async function makeMutualMatch(userId, botId, transaction) {
   if (existing) {
     return { newlyCreated: false };
   }
-  
+
   await UserInteraction.upsert(
     {
       user_id: userId,
@@ -421,7 +410,7 @@ async function makeMutualMatch(userId, botId, transaction) {
     { transaction }
   );
 
-  //  Create / overwrite bot  user 
+  //  Create / overwrite bot  user
   await UserInteraction.upsert(
     {
       user_id: botId,
@@ -437,7 +426,6 @@ async function makeMutualMatch(userId, botId, transaction) {
     { total_matches: 1 },
     { where: { id: userId }, transaction }
   );
-
 
   return { newlyCreated: true };
 }
@@ -619,9 +607,6 @@ async function getUserMatches(req, res) {
     });
   }
 }
-
-
-
 
 module.exports = {
   likeUser,

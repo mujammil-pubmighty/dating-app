@@ -47,10 +47,10 @@ const UserInteraction = sequelize.define(
       { fields: ["target_user_id"] },
       { fields: ["action"] },
       // make sure only one row per pair+direction
-      {
-        unique: true,
-        fields: ["user_id", "target_user_id"],
-      },
+      // {
+      //   unique: true,
+      //   fields: ["user_id", "target_user_id"],
+      // },
     ],
   }
 );
