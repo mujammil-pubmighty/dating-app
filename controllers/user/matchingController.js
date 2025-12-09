@@ -8,7 +8,7 @@ const {
   isUserSessionValid,
   getOrCreateChatBetweenUsers,
 } = require("../../utils/helper");
-const Chats = require("../../models/chats");
+const Chats = require("../../models/Chat");
 
 async function likeUser(req, res) {
   const transaction = await sequelize.transaction();
@@ -63,8 +63,6 @@ async function likeUser(req, res) {
         message: "Target user not found .",
       });
     }
-
-
 
     // ---- Check existing interaction ----
     const existingInteraction = await UserInteraction.findOne({
@@ -190,7 +188,6 @@ async function rejectUser(req, res) {
       });
     }
 
-    
     // ---- Check existing interaction ----
     const existingInteraction = await UserInteraction.findOne({
       where: {
@@ -386,7 +383,6 @@ async function makeMutualMatch(userId, botId, transaction) {
     { total_matches: 1 },
     { where: { id: userId }, transaction }
   );
-
 
   return { newlyCreated: true };
 }
