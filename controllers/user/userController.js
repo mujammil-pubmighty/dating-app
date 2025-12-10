@@ -38,6 +38,19 @@ async function updateUserProfile(req, res) {
       avatar: Joi.string().max(255).optional().allow(null, ""),
       dob: Joi.date().iso().optional().allow(null, ""),
       bio: Joi.string().optional().allow(null, ""),
+      looking_for: Joi.string()
+    .valid(
+      "Long Term",
+      "Long Term, Open To Short",
+      "Short Term, Open To Long",
+      "Short Term Fun",
+      "New Friends",
+      "Still Figuring Out"
+    )
+    .optional()
+    .allow(null, ""),
+      height: Joi.number().integer().min(50).max(250).optional().allow(null),
+     education: Joi.string().max(200).optional().allow(null, "")
     }).min(1);
     // 1) Validate body
     const { error, value } = updateProfileSchema.validate(req.body, {
@@ -120,6 +133,9 @@ async function updateUserProfile(req, res) {
       "avatar",
       "dob",
       "bio",
+       "looking_for",   
+      "height",        
+      "education"    
     ];
 
     const updates = {};
@@ -151,6 +167,9 @@ async function updateUserProfile(req, res) {
       avatar: user.avatar,
       dob: user.dob,
       bio: user.bio,
+       looking_for: user.looking_for,  
+      height: user.height,             
+      education: user.education,
       coins: user.coins,
       total_likes: user.total_likes,
       total_matches: user.total_matches,
