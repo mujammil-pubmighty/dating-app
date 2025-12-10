@@ -172,9 +172,6 @@ async function sendMessage(req, res) {
       );
     }
 
-    // ---------------------------
-    // UPDATE CHAT
-    // ---------------------------
     const updateData = {
       last_message_id: userMessage.id,
       last_message_time: new Date(),

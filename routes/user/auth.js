@@ -21,6 +21,7 @@ router.post("/login", authController.loginUser);
 router.post("/forgot-password", authController.forgotPassword);
 router.post("/forgot-password/verify", authController.forgotPasswordVerify);
 
+//chatting between user1 & user2
 router.post("/chats/:chatId/messages", chatController.sendMessage);
 router.get("/chats/:chatId/messages", chatController.getChatMessages);
 router.get("/chats", chatController.getUserChats);
@@ -41,11 +42,7 @@ router.get("/persons", userController.getAllPersons);
 router.get("/persons/random", userController.getRandomPersons);
 router.get("/persons/recommended", userController.getRecommendedPersons);
 router.get("/persons/:id", userController.getPersonById);
-router.post(
-  "/profile",
-  fileUploader.single("avatar"),
-  userController.updateUserProfile
-);
+router.post("/profile", fileUploader.single("avatar"), userController.updateUserProfile);
 
 //ads view
 router.get("/ads/status", adsController.getAdStatus);

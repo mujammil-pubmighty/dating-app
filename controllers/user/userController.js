@@ -715,10 +715,10 @@ async function getRandomPersons(req, res) {
       name = null,
     } = req.query;
 
-    const isSessionValid = await isUserSessionValid(req);
-    if (!isSessionValid.success) return res.status(401).json(isSessionValid);
+    // const isSessionValid = await isUserSessionValid(req);
+    // if (!isSessionValid.success) return res.status(401).json(isSessionValid);
 
-    const userId = isSessionValid.data;
+    // const userId = isSessionValid.data;
     let totalPages = parseInt(
       await getOption("total_maxpage_for_persons", 100),
       10
@@ -754,19 +754,19 @@ async function getRandomPersons(req, res) {
       whereCondition.username = { [Op.like]: `${name.trim()}%` };
     }
 
-    const interactions = await UserInteraction.findAll({
-      where: {
-        user_id: userId,
-        action: { [Op.in]: ["like", "reject", "match"] },
-      },
-      attributes: ["target_user_id"],
-    });
+    // const interactions = await UserInteraction.findAll({
+    //   where: {
+    //     user_id: userId,
+    //     action: { [Op.in]: ["like", "reject", "match"] },
+    //   },
+    //   attributes: ["target_user_id"],
+    // });
 
-    const excludedIds = interactions.map((row) => row.target_user_id);
+    // const excludedIds = interactions.map((row) => row.target_user_id);
 
-    if (excludedIds.length > 0) {
-      whereCondition.id = { [Op.notIn]: excludedIds };
-    }
+    // if (excludedIds.length > 0) {
+    //   whereCondition.id = { [Op.notIn]: excludedIds };
+    // }
 
     const { rows, count } = await User.findAndCountAll({
       where: whereCondition,
