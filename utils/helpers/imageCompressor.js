@@ -1,7 +1,7 @@
 const path = require("path");
 const fs = require("fs-extra");
 const sharp = require("sharp");
-const { getOption } = require("../helper"); // if you want dynamic quality option
+const { getOption } = require("../helper"); // adjust path
 
 const ROOT_DIR = path.resolve(__dirname, "..", "..");
 const PUBLIC_DIR = path.join(ROOT_DIR, "public");
@@ -18,7 +18,7 @@ async function compressImage(tempPath, folder = "upload/avatar") {
 
     await sharp(tempPath)
       .rotate()
-      .resize(700, 700, { fit: "cover" }) // optional resize (edit as needed)
+      .resize(700, 700, { fit: "cover" })
       .webp({ quality, effort: 6 })
       .toFile(finalPath);
 

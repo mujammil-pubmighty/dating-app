@@ -23,6 +23,11 @@ async function updateUserProfile(req, res) {
   const transaction = await sequelize.transaction();
 
   try {
+    if (req.file) {
+      const filename = await compressImage(req.file.path, "upload/avatar");
+      req.body.avatar = filename;
+    }
+
     const updateProfileSchema = Joi.object({
       username: Joi.string().min(3).max(50).optional(),
       email: Joi.string().email().max(100).optional().allow(null, ""),
@@ -38,21 +43,24 @@ async function updateUserProfile(req, res) {
       avatar: Joi.string().max(255).optional().allow(null, ""),
       dob: Joi.date().iso().optional().allow(null, ""),
       bio: Joi.string().optional().allow(null, ""),
+
       looking_for: Joi.string()
-    .valid(
-      "Long Term",
-      "Long Term Open To Short",
-      "Short Term Open To Long",
-      "Short Term Fun",
-      "New Friends",
-      "Still Figuring Out"
-    )
-    .optional()
-    .allow(null, ""),
-    height: Joi.string().max(250).optional().allow(null,""),
-     education: Joi.string().max(200).optional().allow(null, "")
+        .valid(
+          "Long Term",
+          "Long Term Open To Short",
+          "Short Term Open To Long",
+          "Short Term Fun",
+          "New Friends",
+          "Still Figuring Out"
+        )
+        .optional()
+        .allow(null, ""),
+
+      height: Joi.number().integer().min(50).max(250).optional().allow(null),
+      education: Joi.string().max(200).optional().allow(null, "")
     }).min(1);
-    // 1) Validate body
+
+    
     const { error, value } = updateProfileSchema.validate(req.body, {
       abortEarly: true,
       stripUnknown: true,
@@ -75,7 +83,7 @@ async function updateUserProfile(req, res) {
 
     const userId = Number(sessionResult.data);
 
-    // 3) Load current user
+    //  Load current user
     const user = await User.findByPk(userId, { transaction });
 
     if (!user) {
@@ -86,7 +94,7 @@ async function updateUserProfile(req, res) {
       });
     }
 
-    // Handle unique checks for username/email if they are being changed
+    //  Unique checks
     if (value.username && value.username !== user.username) {
       const existingUsername = await User.findOne({
         where: { username: value.username },
@@ -103,8 +111,8 @@ async function updateUserProfile(req, res) {
     }
 
     if (
-      typeof value.email !== "undefined" && // email provided (can be null or empty)
-      value.email && // not empty string
+      typeof value.email !== "undefined" &&
+      value.email &&
       value.email !== user.email
     ) {
       const existingEmail = await User.findOne({
@@ -133,9 +141,9 @@ async function updateUserProfile(req, res) {
       "avatar",
       "dob",
       "bio",
-       "looking_for",   
-      "height",        
-      "education"    
+      "looking_for",
+      "height",
+      "education"
     ];
 
     const updates = {};
@@ -146,10 +154,8 @@ async function updateUserProfile(req, res) {
       }
     }
 
-    // Update timestamp
     updates.updated_at = new Date();
 
-    //  Apply update
     await user.update(updates, { transaction });
 
     await transaction.commit();
@@ -167,8 +173,8 @@ async function updateUserProfile(req, res) {
       avatar: user.avatar,
       dob: user.dob,
       bio: user.bio,
-       looking_for: user.looking_for,  
-      height: user.height,             
+      looking_for: user.looking_for,
+      height: user.height,
       education: user.education,
       coins: user.coins,
       total_likes: user.total_likes,
@@ -195,6 +201,7 @@ async function updateUserProfile(req, res) {
     });
   }
 }
+
 
 async function changePassword(req, res) {
   const transaction = await sequelize.transaction();
