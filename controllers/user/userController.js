@@ -24,8 +24,8 @@ async function updateUserProfile(req, res) {
 
   try {
     if (req.file) {
-      const filename = await compressImage(req.file.path, "upload/avatar");
-      req.body.avatar = filename;
+      const result  = await compressImage(req.file.path, "avatar");
+      req.body.avatar = result .filename;
     }
 
     const updateProfileSchema = Joi.object({
