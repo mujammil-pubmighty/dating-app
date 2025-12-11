@@ -202,10 +202,72 @@ async function sendMessage(req, res) {
     await chat.update(updateData, { transaction });
     await transaction.commit();
 
+    let botMessageSaved = null;
+    try {
+      const receiver = await User.findByPk(receiverId); // reload receiver outside tx
+
+      if (receiver && receiver.type === "bot") {
+        // Fallback canned messages
+        const fallbackMessages = [
+          "Hey! I’m here ",
+          "I was thinking about you just now.",
+          "Tell me more, I’m really curious.",
+          "That sounds interesting, go on ",
+          "You make this chat more fun!",
+        ];
+
+        let botReplyText = null;
+        try {
+          botReplyText = await generateBotReplyForChat(chat.id, textBody || "");
+        } catch (aiErr) {
+          console.error("[sendMessage] AI bot reply error:", aiErr);
+        }
+        if (!botReplyText || !botReplyText.toString().trim()) {
+          botReplyText =
+            fallbackMessages[
+              Math.floor(Math.random() * fallbackMessages.length)
+            ];
+        }
+        botMessageSaved = await Message.create({
+          chat_id: chat.id,
+          sender_id: receiverId, // bot
+          receiver_id: userId,
+          message: botReplyText,
+          reply_id: newMsg.id,
+          message_type: "text",
+          sender_type: "bot",
+          status: "sent",
+          is_paid: false,
+          price: 0,
+          media_url: null,
+          media_type: null,
+          file_size: null,
+        });
+
+        const botUpdateData = {
+          last_message_id: botMessageSaved.id,
+          last_message_time: new Date(),
+        };
+
+        if (isUserP1) {
+          // sender was p1, so bot replies to p1 → unread for p1
+          botUpdateData.unread_count_p1 = (chat.unread_count_p1 || 0) + 1;
+        } else {
+          botUpdateData.unread_count_p2 = (chat.unread_count_p2 || 0) + 1;
+        }
+
+        await Chat.update(botUpdateData, { where: { id: chat.id } });
+      }
+    } catch (botErr) {
+      console.error("[sendMessage] Error during bot reply:", botErr);
+    }
     return res.json({
       success: true,
       message: "Message sent",
-      data: newMsg,
+      data: {
+        userMessage: newMsg,
+        botMessage: botMessageSaved,
+      },
     });
   } catch (err) {
     console.error("sendMessage error:", err);
