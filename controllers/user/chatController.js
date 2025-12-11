@@ -6,11 +6,8 @@ const User = require("../../models/User");
 const CoinSpentTransaction = require("../../models/CoinSpentTransaction");
 const { generateBotReplyForChat } = require("../../utils/helpers/aiHelper");
 const { isUserSessionValid, getOption } = require("../../utils/helper");
-const {
-  verifyFileType,
-  uploadFile,
-  cleanupTempFiles,
-} = require("../../utils/helpers/fileUpload");
+const {verifyFileType, uploadFile, cleanupTempFiles} = require("../../utils/helpers/fileUpload");
+const { compressImage } = require("../../utils/helpers/imageCompressor");
 
 async function sendMessage(req, res) {
   const transaction = await Message.sequelize.transaction();
@@ -26,16 +23,16 @@ async function sendMessage(req, res) {
       await cleanupTempFiles([file]);
       return res.status(401).json(sessionResult);
     }
-    const userId = Number(sessionResult.data);
 
-    if (!chatIdParam) {
+    const userId = Number(sessionResult.data);
+    const chatId = Number(chatIdParam);
+
+    if (!chatId) {
       await cleanupTempFiles([file]);
       return res
         .status(400)
         .json({ success: false, message: "chatId required" });
     }
-
-    const chatId = Number(chatIdParam);
 
     const chat = await Chat.findByPk(chatId, { transaction });
     if (!chat) {
@@ -47,6 +44,7 @@ async function sendMessage(req, res) {
 
     const isUserP1 = chat.participant_1_id === userId;
     const isUserP2 = chat.participant_2_id === userId;
+
     if (!isUserP1 && !isUserP2) {
       await cleanupTempFiles([file]);
       return res
@@ -56,30 +54,28 @@ async function sendMessage(req, res) {
 
     const receiverId = isUserP1 ? chat.participant_2_id : chat.participant_1_id;
 
-    //  MESSAGE-TYPE HANDLING (TEXT OR FILE)
-    let finalMessageType = (messageType || "text").toLowerCase();
-    const allowedTypes = ["text", "image", "audio", "video", "file"];
+    // Determine type
+    let finalMessageType = (messageType || (file ? "image" : "text")).toLowerCase();
+    const allowedTypes = ["text", "image"];
+    if (!allowedTypes.includes(finalMessageType)) finalMessageType = file ? "image" : "text";
 
-    if (!allowedTypes.includes(finalMessageType)) {
-      finalMessageType = "text";
-    }
-
-    let finalMediaUrl = null;
+    let finalMediaFilename = null;
     let finalMediaType = null;
     let finalFileSize = null;
 
+    // TEXT MESSAGE
     if (finalMessageType === "text") {
       if (!textBody || !textBody.trim()) {
         await cleanupTempFiles([file]);
-        return res
-          .status(400)
-          .json({ success: false, message: "Message required" });
+        return res.status(400).json({ success: false, message: "Text message is empty" });
       }
+
+      await cleanupTempFiles([file]); // Discard any accidental file
     } else {
       if (!file) {
         return res.status(400).json({
           success: false,
-          message: `file is required for ${finalMessageType}`,
+          message: "Image file is required",
         });
       }
 
@@ -90,39 +86,22 @@ async function sendMessage(req, res) {
         "image/heic",
         "image/heif",
         "image/jpg",
-        "audio/mpeg",
-        "audio/wav",
-        "video/mp4",
-        "application/pdf",
       ]);
 
       if (!detect || !detect.ok) {
         await cleanupTempFiles([file]);
-        return res
-          .status(400)
-          .json({ success: false, message: "Invalid file type" });
+        return res.status(400).json({ success: false, message: "Invalid image type" });
       }
 
-      const saved = await uploadFile(
-        file,
-        "upload/chat", // folder inside public/
-        detect.ext,
-        "chat_message",
-        chatId,
-        req.ip,
-        req.headers["user-agent"],
-        null,
-        null
-      );
+      // Compress image save to upload/chats
+      const compressed = await compressImage(file.path, "chat");
 
-      finalMediaUrl = `/upload/chat/${saved.filename}`;
-      finalMediaType = finalMessageType;
+      finalMediaFilename = compressed.filename; // *** ONLY filename ***
+      finalMediaType = "image";
       finalFileSize = file.size;
-
-      // temp file is already deleted by uploadFile()
     }
 
-    // COIN LOGIC (unchanged)
+    // COINS
     const optionValue = await getOption("cost_per_message", 10);
     let messageCost = parseInt(optionValue ?? 0, 10);
     if (isNaN(messageCost)) messageCost = 0;
@@ -156,11 +135,10 @@ async function sendMessage(req, res) {
         chat_id: chat.id,
         sender_id: userId,
         receiver_id: receiverId,
-
-        message: textBody || "",
-
+        message: finalMessageType === "text" ? (textBody || "").trim() : "",
         message_type: finalMessageType,
-        media_url: finalMediaUrl,
+
+        media_url: finalMediaFilename,   // <<<<<< ONLY FILENAME STORED  
         media_type: finalMediaType,
         file_size: finalFileSize,
 
@@ -173,12 +151,10 @@ async function sendMessage(req, res) {
       { transaction }
     );
 
-    // COIN DEDUCTION
+    // Coin deduction
     if (messageCost > 0) {
-      await sender.update(
-        { coins: sender.coins - messageCost },
-        { transaction }
-      );
+      await sender.update({ coins: sender.coins - messageCost }, { transaction });
+
       await CoinSpentTransaction.create(
         {
           user_id: userId,
@@ -191,15 +167,17 @@ async function sendMessage(req, res) {
       );
     }
 
-    // UPDATE CHAT UNREADS
+    // Update unread counters
     const updateData = {
       last_message_id: newMsg.id,
       last_message_time: new Date(),
     };
+
     if (isUserP1) updateData.unread_count_p2 += 1;
     else updateData.unread_count_p1 += 1;
 
     await chat.update(updateData, { transaction });
+
     await transaction.commit();
 
     let botMessageSaved = null;
@@ -264,10 +242,7 @@ async function sendMessage(req, res) {
     return res.json({
       success: true,
       message: "Message sent",
-      data: {
-        userMessage: newMsg,
-        botMessage: botMessageSaved,
-      },
+      data: newMsg,
     });
   } catch (err) {
     console.error("sendMessage error:", err);
