@@ -159,13 +159,13 @@ async function sendMessage(req, res) {
         message: finalMessageType === "text" ? (textBody || "").trim() : "",
         message_type: finalMessageType,
 
-        media_url: finalMediaFilename, // <<<<<< ONLY FILENAME STORED
+        media_url: finalMediaFilename,
         media_type: finalMediaType,
         file_size: finalFileSize,
 
         reply_id: repliedMessage ? repliedMessage.id : null,
         sender_type: "real",
-        status: "sent",
+        status: "seen",
         is_paid: messageCost > 0,
         price: messageCost,
       },
