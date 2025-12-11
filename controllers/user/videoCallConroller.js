@@ -15,11 +15,6 @@ function now() {
   return new Date();
 }
 
-function calculateCallCost(durationSeconds, perMinuteCost) {
-  if (!durationSeconds || durationSeconds <= 0) return 0;
-  const minutes = Math.ceil(durationSeconds / 60);
-  return minutes * perMinuteCost;
-}
 
 async function initiateVideoCall(req, res) {
   const transaction = await VideoCall.sequelize.transaction();
@@ -47,7 +42,7 @@ async function initiateVideoCall(req, res) {
 
     const { callType } = value;
 
-    // ✅ 2) Validate session
+    // Validate session
     const sessionResult = await isUserSessionValid(req);
     if (!sessionResult.success) {
       await transaction.rollback();
@@ -55,7 +50,7 @@ async function initiateVideoCall(req, res) {
     }
     const callerId = Number(sessionResult.data);
 
-    // ✅ 3) Validate chatId
+    // Validate chatId
     if (!chatIdParam || chatIdParam === "null" || chatIdParam === "undefined") {
       await transaction.rollback();
       return res.status(400).json({
@@ -66,7 +61,7 @@ async function initiateVideoCall(req, res) {
 
     const chatId = Number(chatIdParam);
 
-    // ✅ 4) Find chat inside TX
+    //  Find chat inside TX
     const chat = await Chat.findByPk(chatId, { transaction });
     if (!chat) {
       await transaction.rollback();
@@ -76,7 +71,7 @@ async function initiateVideoCall(req, res) {
       });
     }
 
-    // ✅ 5) Ensure caller is a participant
+    //  Ensure caller is a participant
     const isUserP1 = chat.participant_1_id === callerId;
     const isUserP2 = chat.participant_2_id === callerId;
 
@@ -88,10 +83,10 @@ async function initiateVideoCall(req, res) {
       });
     }
 
-    // ✅ 6) Determine receiver
+    //   Determine receiver
     const receiverId = isUserP1 ? chat.participant_2_id : chat.participant_1_id;
 
-    // ✅ 7) Load caller with row lock (same as sendMessage)
+    //  Load caller with row lock (same as sendMessage)
     const caller = await User.findByPk(callerId, {
       transaction,
       lock: transaction.LOCK.UPDATE,
@@ -108,7 +103,7 @@ async function initiateVideoCall(req, res) {
     // (Optional) You can also load receiver if needed in future:
     // const receiver = await User.findByPk(receiverId, { transaction });
 
-    // ✅ 8) COIN LOGIC using pb_options (same style as sendMessage)
+    //  COIN LOGIC using pb_options (same style as sendMessage)
 
     // cost per minute
     const rawPerMinute = await getOption("video_call_cost_per_minute", 25);
@@ -143,7 +138,7 @@ async function initiateVideoCall(req, res) {
       });
     }
 
-    // ✅ 9) Pre-charge first minute
+    //   Pre-charge first minute
     const initialCharge = perMinuteCost;
     const newCoinBalance = currentCoins - initialCharge;
 
@@ -152,7 +147,7 @@ async function initiateVideoCall(req, res) {
       { transaction }
     );
 
-    // ✅ 10) Create VideoCall row
+    // Create VideoCall row
     const call = await VideoCall.create(
       {
         chat_id: chat.id,
@@ -171,7 +166,7 @@ async function initiateVideoCall(req, res) {
       { transaction }
     );
 
-    // ✅ 11) Log coin transaction (same style as sendMessage)
+    //   Log coin transaction (same style as sendMessage)
     await CoinSpentTransaction.create(
       {
         user_id: callerId,
@@ -188,7 +183,7 @@ async function initiateVideoCall(req, res) {
 
     await transaction.commit();
 
-    // ✅ 12) Response
+    // Response
     return res.json({
       success: true,
       message: "Video call initiated",
@@ -408,7 +403,7 @@ async function endVideoCall(req, res) {
       });
     }
 
-    //  ✅ OPTION USAGE (LIKE ADS)
+    // OPTION USAGE (LIKE ADS)
     const perMinuteRaw = parseInt(
       await getOption("video_call_cost_per_minute", 25),
       10

@@ -8,13 +8,16 @@ const { generateBotReplyForChat } = require("../../utils/helpers/aiHelper");
 const { isUserSessionValid, getOption } = require("../../utils/helper");
 const {verifyFileType, uploadFile, cleanupTempFiles} = require("../../utils/helpers/fileUpload");
 
+const { compressImage } = require("../../utils/helpers/imageCompressor");
+
+
 async function sendMessage(req, res) {
   const transaction = await Message.sequelize.transaction();
 
   try {
     const { chatId: chatIdParam } = req.params;
     const { message: textBody, replyToMessageId, messageType } = req.body;
-    const file = req.file || null; 
+    const file = req.file || null;
 
     const sessionResult = await isUserSessionValid(req);
     if (!sessionResult.success) {
@@ -22,14 +25,14 @@ async function sendMessage(req, res) {
       await cleanupTempFiles([file]);
       return res.status(401).json(sessionResult);
     }
-    const userId = Number(sessionResult.data);
 
-    if (!chatIdParam) {
+    const userId = Number(sessionResult.data);
+    const chatId = Number(chatIdParam);
+
+    if (!chatId) {
       await cleanupTempFiles([file]);
       return res.status(400).json({ success: false, message: "chatId required" });
     }
-
-    const chatId = Number(chatIdParam);
 
     const chat = await Chat.findByPk(chatId, { transaction });
     if (!chat) {
@@ -39,6 +42,7 @@ async function sendMessage(req, res) {
 
     const isUserP1 = chat.participant_1_id === userId;
     const isUserP2 = chat.participant_2_id === userId;
+
     if (!isUserP1 && !isUserP2) {
       await cleanupTempFiles([file]);
       return res.status(403).json({ success: false, message: "Not in this chat" });
@@ -46,13 +50,9 @@ async function sendMessage(req, res) {
 
     const receiverId = isUserP1 ? chat.participant_2_id : chat.participant_1_id;
 
-    //  MESSAGE-TYPE HANDLING (TEXT OR FILE)
     let finalMessageType = (messageType || "text").toLowerCase();
     const allowedTypes = ["text", "image", "audio", "video", "file"];
-
-    if (!allowedTypes.includes(finalMessageType)) {
-      finalMessageType = "text";
-    }
+    if (!allowedTypes.includes(finalMessageType)) finalMessageType = "text";
 
     let finalMediaUrl = null;
     let finalMediaType = null;
@@ -64,7 +64,6 @@ async function sendMessage(req, res) {
         return res.status(400).json({ success: false, message: "Message required" });
       }
     } else {
-   
       if (!file) {
         return res.status(400).json({
           success: false,
@@ -79,7 +78,7 @@ async function sendMessage(req, res) {
         "image/heic",
         "image/heif",
         "image/jpg",
-        "audio/mpeg", 
+        "audio/mpeg",
         "audio/wav",
         "video/mp4",
         "application/pdf",
@@ -90,26 +89,30 @@ async function sendMessage(req, res) {
         return res.status(400).json({ success: false, message: "Invalid file type" });
       }
 
-      const saved = await uploadFile(
-        file,
-        "upload/chat",   // folder inside public/
-        detect.ext,
-        "chat_message",
-        chatId,
-        req.ip,
-        req.headers["user-agent"],
-        null,
-        null
-      );
+      if (finalMessageType === "image") {
+        const compressed = await compressImage(file.path, "chat");
+        finalMediaUrl = compressed.url;
+        finalMediaType = "image";
+        finalFileSize = file.size; // original file size
+      } else {
+        const saved = await uploadFile(
+          file,
+          "upload/chat",
+          detect.ext,
+          "chat_message",
+          chatId,
+          req.ip,
+          req.headers["user-agent"],
+          null,
+          null
+        );
 
-      finalMediaUrl = `/upload/chat/${saved.filename}`;
-      finalMediaType = finalMessageType;
-      finalFileSize = file.size;
-
-      // temp file is already deleted by uploadFile()
+        finalMediaUrl = `/upload/chat/${saved.filename}`;
+        finalMediaType = finalMessageType;
+        finalFileSize = file.size;
+      }
     }
 
-    // COIN LOGIC (unchanged)
     const optionValue = await getOption("cost_per_message", 10);
     let messageCost = parseInt(optionValue ?? 0, 10);
     if (isNaN(messageCost)) messageCost = 0;
@@ -128,7 +131,6 @@ async function sendMessage(req, res) {
       });
     }
 
-    // REPLY CHECK
     let repliedMessage = null;
     if (replyToMessageId) {
       repliedMessage = await Message.findOne({
@@ -137,7 +139,6 @@ async function sendMessage(req, res) {
       });
     }
 
-    // SAVE MESSAGE
     const newMsg = await Message.create(
       {
         chat_id: chat.id,
@@ -145,8 +146,8 @@ async function sendMessage(req, res) {
         receiver_id: receiverId,
 
         message: textBody || "",
-
         message_type: finalMessageType,
+
         media_url: finalMediaUrl,
         media_type: finalMediaType,
         file_size: finalFileSize,
@@ -175,15 +176,16 @@ async function sendMessage(req, res) {
       );
     }
 
-    // UPDATE CHAT UNREADS
     const updateData = {
       last_message_id: newMsg.id,
       last_message_time: new Date(),
     };
+
     if (isUserP1) updateData.unread_count_p2 += 1;
     else updateData.unread_count_p1 += 1;
 
     await chat.update(updateData, { transaction });
+
     await transaction.commit();
 
     return res.json({
