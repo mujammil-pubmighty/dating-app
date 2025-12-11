@@ -111,7 +111,7 @@ Additional behavior rules for this bot:
 ${extraRules}
 `.trim();
 
-  // 7) Final prompt text for Gemini
+  //  Final prompt text for Gemini
   const promptText = `
 System Instructions:
 ${finalSystemPrompt}

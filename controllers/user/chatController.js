@@ -230,7 +230,7 @@ async function sendMessage(req, res) {
         }
         botMessageSaved = await Message.create({
           chat_id: chat.id,
-          sender_id: receiverId, // bot
+          sender_id: receiverId,
           receiver_id: userId,
           message: botReplyText,
           reply_id: newMsg.id,

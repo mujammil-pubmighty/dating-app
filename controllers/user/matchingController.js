@@ -131,6 +131,7 @@ async function likeUser(req, res) {
   }
 }
 
+
 async function rejectUser(req, res) {
   const transaction = await sequelize.transaction();
 
@@ -249,6 +250,7 @@ async function rejectUser(req, res) {
     });
   }
 }
+
 
 async function matchUser(req, res) {
   const transaction = await sequelize.transaction();
@@ -376,6 +378,7 @@ async function matchUser(req, res) {
   }
 }
 
+
 async function makeMutualMatch(userId, botId, transaction) {
   // Extra safety: don't let undefined slip in
   if (!userId || !botId) {
@@ -429,6 +432,7 @@ async function makeMutualMatch(userId, botId, transaction) {
 
   return { newlyCreated: true };
 }
+
 
 async function getUserMatches(req, res) {
   try {
@@ -609,7 +613,6 @@ async function getUserMatches(req, res) {
     });
   }
 }
-
 
 module.exports = {
   likeUser,
