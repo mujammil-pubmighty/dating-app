@@ -194,6 +194,7 @@ async function sendMessage(req, res) {
           "You make this chat more fun!",
         ];
 
+        
         let botReplyText = null;
         try {
           botReplyText = await generateBotReplyForChat(chat.id, textBody || "");
