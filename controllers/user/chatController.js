@@ -11,7 +11,7 @@ const {
   typingTime,
 } = require("../../utils/helper");
 const {
-  verifyFileType,
+  verifyFileType, //changes
   uploadFile,
   cleanupTempFiles,
 } = require("../../utils/helpers/fileUpload");
@@ -32,7 +32,6 @@ async function sendMessage(req, res) {
     const { message: textBody, replyToMessageId, messageType } = req.body;
     const file = req.file || null;
 
-    // SESSION CHECK
     const sessionResult = await isUserSessionValid(req);
     if (!sessionResult.success) {
       await transaction.rollback();
@@ -51,7 +50,6 @@ async function sendMessage(req, res) {
         .json({ success: false, message: "chatId required" });
     }
 
-    // GET CHAT
     const chat = await Chat.findByPk(chatId, { transaction });
     if (!chat) {
       await transaction.rollback();
@@ -73,6 +71,7 @@ async function sendMessage(req, res) {
     }
 
     const myStatus = isUserP1 ? chat.chat_status_p1 : chat.chat_status_p2;
+
     if (myStatus === "blocked") {
       await transaction.rollback();
       await cleanupTempFiles([file]);
@@ -81,6 +80,13 @@ async function sendMessage(req, res) {
         code: "YOU_BLOCKED_USER",
         message: "You have blocked this user. Unblock to send messages.",
       });
+    }
+
+    if (!isUserP1 && !isUserP2) {
+      await cleanupTempFiles([file]);
+      return res
+        .status(403)
+        .json({ success: false, message: "Not in this chat" });
     }
 
     const receiverId = isUserP1 ? chat.participant_2_id : chat.participant_1_id;
@@ -136,15 +142,13 @@ async function sendMessage(req, res) {
     ).toLowerCase();
 
     const allowedTypes = ["text", "image"];
-    if (!allowedTypes.includes(finalMessageType)) {
+    if (!allowedTypes.includes(finalMessageType))
       finalMessageType = file ? "image" : "text";
-    }
 
     let finalMediaFilename = null;
     let finalMediaType = null;
     let finalFileSize = null;
 
-    // TEXT MESSAGE
     if (finalMessageType === "text") {
       if (!textBody || !textBody.trim()) {
         await transaction.rollback();
@@ -155,10 +159,9 @@ async function sendMessage(req, res) {
       }
       // No file needed for text
       await cleanupTempFiles([file]);
-    }
+    
 
-    // IMAGE MESSAGE
-    if (finalMessageType === "image") {
+    } else {
       if (!file) {
         await transaction.rollback();
         return res
@@ -184,6 +187,7 @@ async function sendMessage(req, res) {
       }
 
       const compressed = await compressImage(file.path, "chat");
+
       finalMediaFilename = compressed.filename;
       finalMediaType = "image";
       finalFileSize = file.size;
@@ -228,9 +232,11 @@ async function sendMessage(req, res) {
         receiver_id: receiverId,
         message: finalMessageType === "text" ? (textBody || "").trim() : "",
         message_type: finalMessageType,
+
         media_url: finalMediaFilename,
         media_type: finalMediaType,
         file_size: finalFileSize,
+
         reply_id: repliedMessage ? repliedMessage.id : null,
         sender_type: "real",
 
@@ -245,7 +251,6 @@ async function sendMessage(req, res) {
       { transaction }
     );
 
-    // COIN DEDUCTION
     if (messageCost > 0) {
       await sender.update(
         { coins: sender.coins - messageCost },
@@ -284,7 +289,7 @@ async function sendMessage(req, res) {
         try {
           botReplyText = await generateBotReplyForChat(chat.id, textBody || "");
         } catch (aiErr) {
-          console.error("[sendMessage] AI reply error:", aiErr);
+          console.error("[sendMessage] AI bot reply error:", aiErr);
         }
 
         if (!botReplyText || !botReplyText.toString().trim()) {
@@ -345,11 +350,8 @@ async function sendMessage(req, res) {
     return res.json({
       success: true,
       message: "Message sent",
-      data: {
-        user: newMsg,
-        bot: botMessageSaved,
-      },
-    });
+      data: newMsg,
+    }); 
   } catch (err) {
     console.error("sendMessage error:", err);
     await transaction.rollback();
