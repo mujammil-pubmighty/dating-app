@@ -5,7 +5,11 @@ const { Op, Sequelize } = require("sequelize");
 const User = require("../../models/User");
 const CoinSpentTransaction = require("../../models/CoinSpentTransaction");
 const { generateBotReplyForChat } = require("../../utils/helpers/aiHelper");
-const { isUserSessionValid, getOption } = require("../../utils/helper");
+const {
+  isUserSessionValid,
+  getOption,
+  typingTime,
+} = require("../../utils/helper");
 const {
   verifyFileType,
   uploadFile,
@@ -50,7 +54,7 @@ async function sendMessage(req, res) {
     const isUserP2 = chat.participant_2_id === userId;
 
     const myStatus = isUserP1 ? chat.chat_status_p1 : chat.chat_status_p2;
-    // If I blocked them → I cannot send messages
+
     if (myStatus === "blocked") {
       await cleanupTempFiles([file]);
       return res.status(403).json({
@@ -59,6 +63,7 @@ async function sendMessage(req, res) {
         message: "You have blocked this user. Unblock to send messages.",
       });
     }
+
     if (!isUserP1 && !isUserP2) {
       await cleanupTempFiles([file]);
       return res
@@ -72,6 +77,7 @@ async function sendMessage(req, res) {
     let finalMessageType = (
       messageType || (file ? "image" : "text")
     ).toLowerCase();
+
     const allowedTypes = ["text", "image"];
     if (!allowedTypes.includes(finalMessageType))
       finalMessageType = file ? "image" : "text";
@@ -80,7 +86,6 @@ async function sendMessage(req, res) {
     let finalMediaType = null;
     let finalFileSize = null;
 
-    // TEXT MESSAGE
     if (finalMessageType === "text") {
       if (!textBody || !textBody.trim()) {
         await cleanupTempFiles([file]);
@@ -89,7 +94,7 @@ async function sendMessage(req, res) {
           .json({ success: false, message: "Text message is empty" });
       }
 
-      await cleanupTempFiles([file]); // Discard any accidental file
+      await cleanupTempFiles([file]);
     } else {
       if (!file) {
         return res.status(400).json({
@@ -114,10 +119,9 @@ async function sendMessage(req, res) {
           .json({ success: false, message: "Invalid image type" });
       }
 
-      // Compress image save to upload/chats
       const compressed = await compressImage(file.path, "chat");
 
-      finalMediaFilename = compressed.filename; // *** ONLY filename ***
+      finalMediaFilename = compressed.filename;
       finalMediaType = "image";
       finalFileSize = file.size;
     }
@@ -141,7 +145,7 @@ async function sendMessage(req, res) {
       });
     }
 
-    // REPLY CHECK
+    // Reply check
     let repliedMessage = null;
     if (replyToMessageId) {
       repliedMessage = await Message.findOne({
@@ -150,7 +154,7 @@ async function sendMessage(req, res) {
       });
     }
 
-    // SAVE MESSAGE
+    // Save message
     const newMsg = await Message.create(
       {
         chat_id: chat.id,
@@ -172,7 +176,6 @@ async function sendMessage(req, res) {
       { transaction }
     );
 
-    // Coin deduction
     if (messageCost > 0) {
       await sender.update(
         { coins: sender.coins - messageCost },
@@ -191,25 +194,16 @@ async function sendMessage(req, res) {
       );
     }
 
-    // Update unread counters
-    const updateData = {
-      last_message_id: newMsg.id,
-      last_message_time: new Date(),
-    };
-
-    if (isUserP1) updateData.unread_count_p2 += 1;
-    else updateData.unread_count_p1 += 1;
-
-    await chat.update(updateData, { transaction });
-
     await transaction.commit();
 
-    let botMessageSaved = null;
+    // ======================
+    // BOT REPLY (with typing delay)
+    // ======================
+
     try {
-      const receiver = await User.findByPk(receiverId); // reload receiver outside tx
+      const receiver = await User.findByPk(receiverId);
 
       if (receiver && receiver.type === "bot") {
-        // Fallback canned messages
         const fallbackMessages = [
           "Hey! I’m here ",
           "I was thinking about you just now.",
@@ -219,50 +213,62 @@ async function sendMessage(req, res) {
         ];
 
         let botReplyText = null;
+
         try {
           botReplyText = await generateBotReplyForChat(chat.id, textBody || "");
         } catch (aiErr) {
           console.error("[sendMessage] AI bot reply error:", aiErr);
         }
+
         if (!botReplyText || !botReplyText.toString().trim()) {
           botReplyText =
             fallbackMessages[
               Math.floor(Math.random() * fallbackMessages.length)
             ];
         }
-        botMessageSaved = await Message.create({
-          chat_id: chat.id,
-          sender_id: receiverId,
-          receiver_id: userId,
-          message: botReplyText,
-          reply_id: newMsg.id,
-          message_type: "text",
-          sender_type: "bot",
-          status: "sent",
-          is_paid: false,
-          price: 0,
-          media_url: null,
-          media_type: null,
-          file_size: null,
-        });
 
-        const botUpdateData = {
-          last_message_id: botMessageSaved.id,
-          last_message_time: new Date(),
-        };
+        const typing = typingTime(botReplyText, 40);
+        const delayMs = typing.milliseconds;
 
-        if (isUserP1) {
-          // sender was p1, so bot replies to p1 → unread for p1
-          botUpdateData.unread_count_p1 = (chat.unread_count_p1 || 0) + 1;
-        } else {
-          botUpdateData.unread_count_p2 = (chat.unread_count_p2 || 0) + 1;
-        }
+        setTimeout(async () => {
+          try {
+            let botMessageSaved = await Message.create({
+              chat_id: chat.id,
+              sender_id: receiverId,
+              receiver_id: userId,
+              message: botReplyText,
+              reply_id: newMsg.id,
+              message_type: "text",
+              sender_type: "bot",
+              status: "sent",
+              is_paid: false,
+              price: 0,
+              media_url: null,
+              media_type: null,
+              file_size: null,
+            });
 
-        await Chat.update(botUpdateData, { where: { id: chat.id } });
+            const botUpdateData = {
+              last_message_id: botMessageSaved.id,
+              last_message_time: new Date(),
+            };
+
+            if (isUserP1) {
+              botUpdateData.unread_count_p1 = (chat.unread_count_p1 || 0) + 1;
+            } else {
+              botUpdateData.unread_count_p2 = (chat.unread_count_p2 || 0) + 1;
+            }
+
+            await Chat.update(botUpdateData, { where: { id: chat.id } });
+          } catch (innerErr) {
+            console.error("[sendMessage] Error saving bot message:", innerErr);
+          }
+        }, delayMs);
       }
     } catch (botErr) {
       console.error("[sendMessage] Error during bot reply:", botErr);
     }
+
     return res.json({
       success: true,
       message: "Message sent",
@@ -405,7 +411,7 @@ async function getUserChats(req, res) {
           ],
           separate: true,
           limit: 1,
-          order: [["created_at", "DESC"]],
+          order: [["id", "DESC"]],
         },
       ],
 
