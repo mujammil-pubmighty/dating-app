@@ -20,6 +20,11 @@ const { compressImage } = require("../../utils/helpers/imageCompressor");
 async function sendMessage(req, res) {
   const transaction = await Message.sequelize.transaction();
 
+  let lastReadMessageId = null;
+  let updatedReadCount = 0;
+  let newMsg = null;
+  let botMessageSaved = null;
+
   try {
     const { chatId: chatIdParam } = req.params;
     const { message: textBody, replyToMessageId, messageType } = req.body;
@@ -36,7 +41,8 @@ async function sendMessage(req, res) {
     const userId = Number(sessionResult.data);
     const chatId = Number(chatIdParam);
 
-    if (!chatId) {
+    if (!chatId || Number.isNaN(chatId)) {
+      await transaction.rollback();
       await cleanupTempFiles([file]);
       return res
         .status(400)
@@ -46,6 +52,7 @@ async function sendMessage(req, res) {
     // GET CHAT
     const chat = await Chat.findByPk(chatId, { transaction });
     if (!chat) {
+      await transaction.rollback();
       await cleanupTempFiles([file]);
       return res
         .status(404)
@@ -56,6 +63,7 @@ async function sendMessage(req, res) {
     const isUserP2 = chat.participant_2_id === userId;
 
     if (!isUserP1 && !isUserP2) {
+      await transaction.rollback();
       await cleanupTempFiles([file]);
       return res
         .status(403)
@@ -64,6 +72,7 @@ async function sendMessage(req, res) {
 
     const myStatus = isUserP1 ? chat.chat_status_p1 : chat.chat_status_p2;
     if (myStatus === "blocked") {
+      await transaction.rollback();
       await cleanupTempFiles([file]);
       return res.status(403).json({
         success: false,
@@ -74,10 +83,56 @@ async function sendMessage(req, res) {
 
     const receiverId = isUserP1 ? chat.participant_2_id : chat.participant_1_id;
 
-    // MESSAGE TYPE
+    {
+      const where = {
+        chat_id: chatId,
+        receiver_id: userId,
+        is_read: false,
+      };
+
+      const [updatedCount] = await Message.update(
+        {
+          is_read: true,
+          read_at: new Date(),
+          status: "read",
+        },
+        { where, transaction }
+      );
+
+      updatedReadCount = updatedCount;
+
+      if (updatedCount > 0) {
+        const lastRead = await Message.findOne({
+          where: {
+            chat_id: chatId,
+            receiver_id: userId,
+            is_read: true,
+          },
+          order: [["id", "DESC"]],
+          transaction,
+        });
+
+        if (lastRead) {
+          lastReadMessageId = lastRead.id;
+        }
+
+        // Reset unread count for THIS user
+        if (isUserP1) {
+          chat.unread_count_p1 = 0;
+        } else if (isUserP2) {
+          chat.unread_count_p2 = 0;
+        }
+
+        await chat.save({ transaction });
+      }
+    }
+
+    // MESSAGE TYPE + FILE HANDLING
+
     let finalMessageType = (
       messageType || (file ? "image" : "text")
     ).toLowerCase();
+
     const allowedTypes = ["text", "image"];
     if (!allowedTypes.includes(finalMessageType)) {
       finalMessageType = file ? "image" : "text";
@@ -90,17 +145,20 @@ async function sendMessage(req, res) {
     // TEXT MESSAGE
     if (finalMessageType === "text") {
       if (!textBody || !textBody.trim()) {
+        await transaction.rollback();
         await cleanupTempFiles([file]);
         return res
           .status(400)
           .json({ success: false, message: "Text message is empty" });
       }
+      // No file needed for text
       await cleanupTempFiles([file]);
     }
 
     // IMAGE MESSAGE
     if (finalMessageType === "image") {
       if (!file) {
+        await transaction.rollback();
         return res
           .status(400)
           .json({ success: false, message: "Image file is required" });
@@ -116,6 +174,7 @@ async function sendMessage(req, res) {
       ]);
 
       if (!detect || !detect.ok) {
+        await transaction.rollback();
         await cleanupTempFiles([file]);
         return res
           .status(400)
@@ -129,9 +188,10 @@ async function sendMessage(req, res) {
     }
 
     // COINS
+
     const optionValue = await getOption("cost_per_message", 10);
     let messageCost = parseInt(optionValue ?? 0, 10);
-    if (isNaN(messageCost)) messageCost = 0;
+    if (Number.isNaN(messageCost)) messageCost = 0;
 
     const sender = await User.findByPk(userId, {
       transaction,
@@ -148,6 +208,7 @@ async function sendMessage(req, res) {
     }
 
     // REPLY CHECK
+
     let repliedMessage = null;
     if (replyToMessageId) {
       repliedMessage = await Message.findOne({
@@ -156,8 +217,9 @@ async function sendMessage(req, res) {
       });
     }
 
-    // SAVE REAL USER MESSAGE
-    const newMsg = await Message.create(
+    const receiver = await User.findByPk(receiverId, { transaction });
+
+    newMsg = await Message.create(
       {
         chat_id: chat.id,
         sender_id: userId,
@@ -169,7 +231,12 @@ async function sendMessage(req, res) {
         file_size: finalFileSize,
         reply_id: repliedMessage ? repliedMessage.id : null,
         sender_type: "real",
-        status: "seen",
+
+        // Always unread from receiver's point of view
+        is_read: true,
+        read_at: null,
+        status: "sent",
+
         is_paid: messageCost > 0,
         price: messageCost,
       },
@@ -195,16 +262,13 @@ async function sendMessage(req, res) {
       );
     }
 
+    // Commit DB transaction
     await transaction.commit();
 
-    // BOT REPLY (with delay)
-
-    let botMessageSaved = null;
-
     try {
-      const receiver = await User.findByPk(receiverId);
+      const freshReceiver = await User.findByPk(receiverId);
 
-      if (receiver && receiver.type === "bot") {
+      if (freshReceiver && freshReceiver.type === "bot") {
         const fallbackMessages = [
           "Hey! I’m here ",
           "I was thinking about you just now.",
@@ -237,6 +301,8 @@ async function sendMessage(req, res) {
           reply_id: newMsg.id,
           message_type: "text",
           sender_type: "bot",
+          is_read: false,
+          read_at: null,
           status: "sent",
           is_paid: false,
           price: 0,
@@ -245,14 +311,13 @@ async function sendMessage(req, res) {
           file_size: null,
         });
 
-        // UPDATE CHAT UNREAD
+        // UPDATE CHAT UNREAD FOR THIS USER (they now have a new unread bot msg)
         const botUpdateData = {
           last_message_id: botMessageSaved.id,
           last_message_time: new Date(),
         };
 
         let delayMs = 0;
-
         if (botMessageSaved && botMessageSaved.message) {
           const typing = typingTime(botMessageSaved.message, 80);
           delayMs = typing.milliseconds;
@@ -267,9 +332,19 @@ async function sendMessage(req, res) {
         }
 
         await Chat.update(botUpdateData, { where: { id: chat.id } });
+
+        // (Optional) SOCKET: bot message event
+        if (global.io && botMessageSaved) {
+          const room = `chat_${chatId}`;
+          global.io.to(room).emit("new_message", {
+            chatId,
+            message: botMessageSaved,
+          });
+        }
       }
     } catch (errBot) {
       console.error("[sendMessage] Bot error:", errBot);
+      // don't fail main response if bot fails
     }
 
     return res.json({
@@ -392,7 +467,10 @@ async function getUserChats(req, res) {
 
     const chats = await Chat.findAll({
       where: {
-        [Op.or]: [{ participant_1_id: userId }, { participant_2_id: userId }],
+        [Op.or]: [
+          { participant_1_id: userId, chat_status_p1: { [Op.ne]: "deleted" } },
+          { participant_2_id: userId, chat_status_p2: { [Op.ne]: "deleted" } },
+        ],
       },
       attributes: [
         "id",
@@ -939,6 +1017,109 @@ async function blockChat(req, res) {
   }
 }
 
+async function deleteChat(req, res) {
+  const transaction = await Chat.sequelize.transaction();
+
+  try {
+    //body parameter
+    const { chat_id } = req.body;
+
+    // Session check
+    const sessionResult = await isUserSessionValid(req);
+    if (!sessionResult.success) {
+      await transaction.rollback();
+      return res.status(401).json(sessionResult);
+    }
+    const userId = Number(sessionResult.data);
+
+    if (!chat_id) {
+      await transaction.rollback();
+      return res
+        .status(400)
+        .json({ success: false, message: "chatId is required" });
+    }
+
+    const chatId = Number(chat_id);
+    if (!chatId || Number.isNaN(chatId)) {
+      await transaction.rollback();
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid chatId" });
+    }
+
+    const chat = await Chat.findByPk(chatId, {
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+
+    if (!chat) {
+      await transaction.rollback();
+      return res
+        .status(404)
+        .json({ success: false, message: "Chat not found" });
+    }
+
+    const isUserP1 = chat.participant_1_id === userId;
+    const isUserP2 = chat.participant_2_id === userId;
+
+    if (!isUserP1 && !isUserP2) {
+      await transaction.rollback();
+      return res
+        .status(403)
+        .json({ success: false, message: "You are not part of this chat" });
+    }
+
+    // Mark chat as deleted only for this user
+    if (isUserP1) {
+      if (chat.chat_status_p1 === "deleted") {
+        await transaction.commit();
+        return res.json({
+          success: true,
+          message: "Chat already deleted for you",
+          data: { chatId: chat.id },
+        });
+      }
+
+      chat.chat_status_p1 = "deleted";
+      chat.is_pin_p1 = false;
+      chat.unread_count_p1 = 0;
+    } else {
+      if (chat.chat_status_p2 === "deleted") {
+        await transaction.commit();
+        return res.json({
+          success: true,
+          message: "Chat already deleted for you",
+          data: { chatId: chat.id },
+        });
+      }
+
+      chat.chat_status_p2 = "deleted";
+      chat.is_pin_p2 = false;
+      chat.unread_count_p2 = 0;
+    }
+
+    await chat.save({ transaction });
+    await transaction.commit();
+
+    return res.json({
+      success: true,
+      message: "Chat deleted for you",
+      data: {
+        chatId: chat.id,
+      },
+    });
+  } catch (err) {
+    console.error("deleteChat error:", err);
+    if (transaction && !transaction.finished) {
+      await transaction.rollback();
+    }
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+    });
+  }
+}
+
 module.exports = {
   sendMessage,
   getChatMessages,
@@ -947,4 +1128,5 @@ module.exports = {
   markChatMessagesRead,
   pinChats,
   blockChat,
+  deleteChat,
 };

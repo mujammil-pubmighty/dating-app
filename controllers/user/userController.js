@@ -740,13 +740,19 @@ async function getRandomPersons(req, res) {
       name = null,
     } = req.query;
 
-    // Session & userId
-    const isSessionValid = await isUserSessionValid(req);
-    if (!isSessionValid.success) {
-      return res.status(401).json(isSessionValid);
+    const sessionResult = await isUserSessionValid(req);
+
+    let userId = null;
+    let isLoggedInUser = false;
+    let uidEsc = "NULL";
+
+    if (sessionResult.success) {
+      userId = Number(sessionResult.data);
+      if (!Number.isNaN(userId)) {
+        isLoggedInUser = true;
+        uidEsc = sequelize.escape(userId);
+      }
     }
-    const userId = Number(isSessionValid.data);
-    const isLoggedInUser = !!userId;
 
     // Options for pagination
     let totalPages = parseInt(
@@ -765,7 +771,6 @@ async function getRandomPersons(req, res) {
 
     const offset = (page - 1) * perPage;
 
-    // WHERE conditions (same as before)
     const whereCondition = { type: "bot" };
 
     if (isActive !== "all") {
@@ -781,13 +786,9 @@ async function getRandomPersons(req, res) {
       whereCondition.username = { [Op.like]: `${name.trim()}%` };
     }
 
-    //  Build EXISTS SQLs (chapter unlock style)
-    const UI_TBL = "pb_user_interactions"; // your real table name
-    const USER_ALIAS = "`User`"; // Sequelize alias
+    const UI_TBL = "pb_user_interactions";
+    const USER_ALIAS = "`User`";
 
-    const uidEsc = isLoggedInUser ? sequelize.escape(userId) : "NULL";
-
-    // hasLiked: user already liked this target
     const hasLikedSQL = isLoggedInUser
       ? `EXISTS (
           SELECT 1 FROM ${UI_TBL} ui
@@ -797,7 +798,6 @@ async function getRandomPersons(req, res) {
         )`
       : "FALSE";
 
-    // hasRejected: user has rejected this target
     const hasRejectedSQL = isLoggedInUser
       ? `EXISTS (
           SELECT 1 FROM ${UI_TBL} ui2
@@ -807,7 +807,6 @@ async function getRandomPersons(req, res) {
         )`
       : "FALSE";
 
-    // hasMatched: they are matched
     const hasMatchedSQL = isLoggedInUser
       ? `EXISTS (
           SELECT 1 FROM ${UI_TBL} ui3
@@ -817,8 +816,6 @@ async function getRandomPersons(req, res) {
         )`
       : "FALSE";
 
-    // canLike: allowed to like ONLY if there is NO 'like' record yet.
-    // Rejection does NOT block like.
     const canLikeSQL = isLoggedInUser
       ? `NOT EXISTS (
           SELECT 1 FROM ${UI_TBL} ui4
@@ -826,9 +823,8 @@ async function getRandomPersons(req, res) {
             AND ui4.target_user_id = ${USER_ALIAS}.id
             AND ui4.action = 'like'
         )`
-      : "FALSE"; // or "TRUE" if you want guests to like (probably not)
+      : "FALSE"; 
 
-    // Single query with interaction flags
     const { rows, count } = await User.findAndCountAll({
       where: whereCondition,
       attributes: {
@@ -840,7 +836,7 @@ async function getRandomPersons(req, res) {
           [Sequelize.literal(canLikeSQL), "canLike"],
         ],
       },
-      order: sequelize.random(), // still random
+      order: sequelize.random(),
       limit: perPage,
       offset,
       subQuery: false,
@@ -855,6 +851,7 @@ async function getRandomPersons(req, res) {
       message: "Random persons fetched successfully.",
       data: {
         rows,
+        isGuest: !isLoggedInUser,
         pagination: {
           page,
           perPage,
@@ -874,6 +871,7 @@ async function getRandomPersons(req, res) {
     });
   }
 }
+
 
 async function getUserSettings(req, res) {
   try {
