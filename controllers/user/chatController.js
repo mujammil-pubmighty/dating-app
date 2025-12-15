@@ -475,6 +475,17 @@ async function getUserChats(req, res) {
         "participant_2_id",
         "is_pin_p1",
         "is_pin_p2",
+        [
+          Sequelize.literal(`(
+            SELECT COUNT(*)
+            FROM pb_messages AS m
+            WHERE 
+              m.chat_id = Chat.id
+              AND m.receiver_id = ${userId}
+              AND m.is_read = 0
+          )`),
+          "unread_count",
+        ],
       ],
 
       include: [
@@ -533,17 +544,9 @@ async function getUserChats(req, res) {
 
       const lastMessage = chat.messages[0] || null;
 
-      const unreadCount = await Message.count({
-        where: {
-          chat_id: chat.id,
-          sender_id: otherUserId,
-          receiver_id: userId,
-          is_read: false,
-        },
-      });
-
       const isPinnedForUser =
         chat.participant_1_id === userId ? chat.is_pin_p1 : chat.is_pin_p2;
+      const unreadCount = Number(chat.get("unread_count") || 0);
 
       chatList.push({
         chat_id: chat.id,
@@ -551,7 +554,7 @@ async function getUserChats(req, res) {
         last_message: lastMessage ? lastMessage.message : null,
         last_message_type: lastMessage ? lastMessage.message_type : null,
         last_message_time: lastMessage ? lastMessage.created_at : null,
-        unread_count: unreadCount,
+        unread_count: unreadCount,   
         is_pin: !!isPinnedForUser,
       });
     }
@@ -771,7 +774,6 @@ async function deleteMessage(req, res) {
 
 async function markChatMessagesRead(req, res) {
   try {
-    //  Validate params + body
     const schema = Joi.object({
       chatId: Joi.number().integer().required(),
       lastMessageId: Joi.number().integer().optional(),
@@ -796,14 +798,12 @@ async function markChatMessagesRead(req, res) {
 
     const { chatId, lastMessageId } = value;
 
-    //  Check session (real user from token/cookie)
     const sessionResult = await isUserSessionValid(req);
     if (!sessionResult.success) {
       return res.status(401).json(sessionResult);
     }
     const userId = Number(sessionResult.data);
 
-    //  Verify chat exists
     const chat = await Chat.findByPk(chatId);
     if (!chat) {
       return res.status(404).json({
@@ -812,7 +812,6 @@ async function markChatMessagesRead(req, res) {
       });
     }
 
-    // User must be a participant in chat
     if (chat.participant_1_id !== userId && chat.participant_2_id !== userId) {
       return res.status(403).json({
         success: false,
@@ -820,7 +819,6 @@ async function markChatMessagesRead(req, res) {
       });
     }
 
-    //  Build where condition for messages
     const where = {
       chat_id: chatId,
       receiver_id: userId,
@@ -828,11 +826,9 @@ async function markChatMessagesRead(req, res) {
     };
 
     if (lastMessageId) {
-      // Mark only messages up to that id as read
       where.id = { [Op.lte]: lastMessageId };
     }
 
-    //  Update messages
     const [updatedCount] = await Message.update(
       {
         is_read: true,
@@ -842,7 +838,6 @@ async function markChatMessagesRead(req, res) {
       { where }
     );
 
-    //  Find last read message for reference
     const lastRead = await Message.findOne({
       where: {
         chat_id: chatId,
@@ -851,14 +846,21 @@ async function markChatMessagesRead(req, res) {
       },
       order: [["id", "DESC"]],
     });
+    const remainingUnread = await Message.count({
+      where: {
+        chat_id: chatId,
+        receiver_id: userId,
+        is_read: false,
+      },
+    });
 
-    //  Emit real-time event
     if (global.io && updatedCount > 0 && lastRead) {
       const room = `chat_${chatId}`;
       global.io.to(room).emit("messages_read", {
         chatId,
         userId,
         lastReadMessageId: lastRead.id,
+        unreadCount: remainingUnread,  
       });
     }
 
@@ -868,6 +870,7 @@ async function markChatMessagesRead(req, res) {
       data: {
         updatedCount,
         lastReadMessageId: lastRead ? lastRead.id : null,
+        unreadCount: remainingUnread,  
       },
     });
   } catch (err) {
