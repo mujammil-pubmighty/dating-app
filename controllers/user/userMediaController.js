@@ -7,6 +7,7 @@ const { isUserSessionValid } = require("../../utils/helper"); // adjust path if 
 const {
   uploadProfileMedia,
   deleteProfileMediaFile,
+  buildProfileMediaUrl,
 } = require("../../utils/helpers/mediaHelper");
 
 async function uploadUserMedia(req, res) {
@@ -45,7 +46,7 @@ async function uploadUserMedia(req, res) {
       });
     }
 
-    // Enforce max 5 active gallery media per user (as per docs)
+    // Enforce max 5 active gallery media per user
     if (folder === "gallery") {
       const galleryCount = await UserMedia.count({
         where: {
@@ -64,15 +65,16 @@ async function uploadUserMedia(req, res) {
     }
 
     const mediaInfo = await uploadProfileMedia(file);
-    
+
+    // Store ONLY the filename in the `url` column
     const media = await UserMedia.create({
       user_id: userId,
       name: file.originalname,
-      url: mediaInfo.url,          
+      url: mediaInfo.filename,   
       size: mediaInfo.size,
-      type: mediaInfo.type,        
+      type: mediaInfo.type,
       mime_type: mediaInfo.mime,
-      folder,                      
+      folder,
       status: "active",
       uploaded_at: new Date(),
     });
@@ -81,19 +83,21 @@ async function uploadUserMedia(req, res) {
     if (folder === "profile") {
       const user = await User.findByPk(userId);
       if (user) {
-   
+        // store only filename as avatar
         if (!user.avatar || is_primary) {
-          user.avatar = mediaInfo.url;
+          user.avatar = mediaInfo.filename;
           await user.save();
         }
       }
     }
 
-    //  Done
+    // Build response with full_url for frontend convenience
+    const plain = media.toJSON();
+    plain.full_url = buildProfileMediaUrl(plain.url); 
     return res.status(201).json({
       success: true,
       message: "Media uploaded successfully",
-      data: media,
+      data: plain,
     });
   } catch (err) {
     console.error("uploadUserMedia error:", err);
@@ -103,6 +107,7 @@ async function uploadUserMedia(req, res) {
     });
   }
 }
+
 async function getMyMedia(req, res) {
   try {
     // Session check
@@ -139,9 +144,15 @@ async function getMyMedia(req, res) {
       order: [["uploaded_at", "DESC"]],
     });
 
+    const data = mediaList.map((m) => {
+      const plain = m.toJSON();
+      plain.full_url = buildProfileMediaUrl(plain.url);
+      return plain;
+    });
+
     return res.json({
       success: true,
-      data: mediaList,
+      data,
     });
   } catch (err) {
     console.error("getMyMedia error:", err);
@@ -154,7 +165,7 @@ async function getMyMedia(req, res) {
 
 async function deleteMyMedia(req, res) {
   try {
-    //Session check
+    // Session check
     const session = await isUserSessionValid(req);
     if (!session.success) {
       return res.status(401).json(session);
@@ -189,16 +200,14 @@ async function deleteMyMedia(req, res) {
     media.status = "deleted";
     await media.save();
 
-    // Delete physical file (best-effort)
     if (media.url) {
       const filename = path.basename(media.url);
       await deleteProfileMediaFile(filename);
     }
 
-    // If this file was user's current avatar, clear avatar field
     const user = await User.findByPk(userId);
     if (user && user.avatar === media.url) {
-      user.avatar = null; // or set default avatar URL
+      user.avatar = null; 
       await user.save();
     }
 

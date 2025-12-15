@@ -8,11 +8,11 @@ const mimeTypes = require("mime-types");
 const { getOption } = require("../helper");
 
 const ROOT_DIR = path.resolve(__dirname, "..", "..");
-
 const PUBLIC_DIR = path.join(ROOT_DIR, "public");
 
 const PROFILE_MEDIA_FOLDER = path.join("upload", "profile-media");
 const PROFILE_MEDIA_DIR = path.join(PUBLIC_DIR, PROFILE_MEDIA_FOLDER);
+const PROFILE_MEDIA_WEB_PATH = "/upload/profile-media";
 
 async function detectFileType(file) {
   if (!file || !file.path) return null;
@@ -51,7 +51,6 @@ async function uploadProfileMedia(file) {
     throw new Error("No file provided for profile media");
   }
 
-  // 1) Detect file type using magic bytes
   const detected = await detectFileType(file);
   if (!detected) {
     await safeRemoveTemp(file);
@@ -64,7 +63,6 @@ async function uploadProfileMedia(file) {
   const isImage = mime.startsWith("image/");
   const isVideo = mime.startsWith("video/");
 
-  // Allowed mime types – you can tweak this list
   const allowedImages = [
     "image/png",
     "image/jpeg",
@@ -90,10 +88,10 @@ async function uploadProfileMedia(file) {
     throw new Error(`Unsupported video type: ${mime}`);
   }
 
-  // 2) Ensure profile-media directory exists
+  // Ensure profile-media directory exists
   await fs.ensureDir(PROFILE_MEDIA_DIR);
 
-  // 3) Unique base name
+  // Unique base name
   const uniqueBase = `IMG-${Date.now()}-${Math.round(Math.random() * 1e9)}`;
 
   let finalFilename;
@@ -104,7 +102,7 @@ async function uploadProfileMedia(file) {
 
   try {
     if (isImage) {
-      // --- IMAGE FLOW: compress to WebP in /upload/profile-media ---
+   
       finalFilename = `${uniqueBase}.webp`;
       finalPath = path.join(PROFILE_MEDIA_DIR, finalFilename);
 
@@ -128,7 +126,7 @@ async function uploadProfileMedia(file) {
       finalMime = "image/webp";
       mediaType = "image";
     } else {
-      // --- VIDEO FLOW: store original file in /upload/profile-media ---
+ 
       const safeExt = ext ? `.${ext.toLowerCase()}` : ".mp4";
       finalFilename = `${uniqueBase}${safeExt}`;
       finalPath = path.join(PROFILE_MEDIA_DIR, finalFilename);
@@ -143,21 +141,17 @@ async function uploadProfileMedia(file) {
       mediaType = "video";
     }
 
-    // 4) Clean up temp file (if still exists)
+    // Clean up temp file (if still exists)
     await safeRemoveTemp(file);
 
-    // 5) Build URL (relative to /public)
-    const url = `/${PROFILE_MEDIA_FOLDER.replace(/\\/g, "/")}/${finalFilename}`;
-
     return {
-      filename: finalFilename,
-      url,
+      filename: finalFilename, 
       type: mediaType,
       mime: finalMime,
       size: finalSize,
     };
   } catch (err) {
-    // On error, cleanup temp + final
+    
     await safeRemoveTemp(file);
     if (finalPath) {
       try {
@@ -167,7 +161,6 @@ async function uploadProfileMedia(file) {
     throw err;
   }
 }
-
 
 async function deleteProfileMediaFile(filename) {
   try {
@@ -185,7 +178,13 @@ async function deleteProfileMediaFile(filename) {
   }
 }
 
+function buildProfileMediaUrl(filename) {
+  if (!filename) return null;
+  return `${PROFILE_MEDIA_WEB_PATH}/${filename}`;
+}
+
 module.exports = {
   uploadProfileMedia,
   deleteProfileMediaFile,
+  buildProfileMediaUrl, 
 };
