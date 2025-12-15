@@ -4,6 +4,7 @@ const Chat = require("./Chat");
 const Message = require("./Message");
 const CoinPackage = require("./CoinPackage");
 const CoinPurchaseTransaction = require("./CoinPurchaseTransaction");
+const UserMedia = require("./UserMedia");
 
 function setupAssociations() {
   User.hasMany(UserInteraction, {
@@ -33,6 +34,21 @@ function setupAssociations() {
     onDelete: "CASCADE",
     onUpdate: "CASCADE",
   });
+
+   User.hasMany(UserMedia, {
+    foreignKey: "user_id",
+    as: "media", // user.getMedia()
+    onDelete: "CASCADE",
+    onUpdate: "CASCADE",
+  });
+
+  UserMedia.belongsTo(User, {
+    foreignKey: "user_id",
+    as: "user", // media.getUser()
+    onDelete: "CASCADE",
+    onUpdate: "CASCADE",
+  });
+
   Chat.belongsTo(User, {
     as: "participant1",
     foreignKey: "participant_1_id",
@@ -54,9 +70,7 @@ function setupAssociations() {
     as: "ChatAsParticipant2",
     foreignKey: "participant_2_id",
   });
-  // -------------------------------
-  // CHAT → MESSAGE RELATIONSHIPS
-  // -------------------------------
+
   Chat.hasMany(Message, {
     foreignKey: "chat_id",
     as: "messages",
@@ -68,17 +82,11 @@ function setupAssociations() {
     as: "lastMessage",
   });
 
-  // -------------------------------
-  // MESSAGE → CHAT RELATIONSHIP
-  // -------------------------------
   Message.belongsTo(Chat, {
     foreignKey: "chat_id",
     as: "chat",
   });
 
-  // -------------------------------
-  // MESSAGE → USER RELATIONSHIPS
-  // -------------------------------
   Message.belongsTo(User, {
     foreignKey: "sender_id",
     as: "sender",

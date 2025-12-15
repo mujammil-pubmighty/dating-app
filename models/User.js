@@ -1,5 +1,5 @@
 const { DataTypes } = require("sequelize");
-const sequelize = require("../config/db"); // <-- update path as per project
+const sequelize = require("../config/db"); 
 
 const User = sequelize.define(
   "User",
@@ -76,7 +76,10 @@ const User = sequelize.define(
     bio: {
       type: DataTypes.TEXT,
     },
-
+     interests: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    },
     looking_for: {
       type: DataTypes.ENUM(
         "Long Term",

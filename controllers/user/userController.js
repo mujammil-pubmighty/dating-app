@@ -23,10 +23,47 @@ const { compressImage } = require("../../utils/helpers/imageCompressor");
 async function updateUserProfile(req, res) {
   const transaction = await sequelize.transaction();
 
+  const normalizeInterests = (raw) => {
+    if (!raw) return null;
+
+    let arr = [];
+
+    if (Array.isArray(raw)) {
+      arr = raw;
+    } else if (typeof raw === "string") {
+      arr = raw.split(",");
+    } else {
+      return null;
+    }
+
+    let ids = arr
+      .map((v) => String(v).trim())
+      .filter(Boolean);
+
+    // remove duplicates
+    ids = [...new Set(ids)];
+
+    // limit to 6
+    ids = ids.slice(0, 6);
+
+    if (!ids.length) return null;
+
+    return ids.join(","); 
+  };
+
+  // Helper: parse stored CSV -> array of IDs
+  const parseInterests = (stored) => {
+    if (!stored) return [];
+    return stored
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  };
+
   try {
     if (req.file) {
-      const result  = await compressImage(req.file.path, "avatar");
-      req.body.avatar = result .filename;
+      const result = await compressImage(req.file.path, "avatar");
+      req.body.avatar = result.filename;
     }
 
     const updateProfileSchema = Joi.object({
@@ -48,8 +85,8 @@ async function updateUserProfile(req, res) {
       looking_for: Joi.string()
         .valid(
           "Long Term",
-          "Long Term Open To Short",
-          "Short Term Open To Long",
+          "Long Term, Open To Short",
+          "Short Term, Open To Long",
           "Short Term Fun",
           "New Friends",
           "Still Figuring Out"
@@ -59,6 +96,12 @@ async function updateUserProfile(req, res) {
 
       height: Joi.string().max(250).optional().allow(null),
       education: Joi.string().max(200).optional().allow(null, ""),
+      interests: Joi.alternatives()
+        .try(
+          Joi.array().items(Joi.alternatives(Joi.number().integer(), Joi.string())).max(6),
+          Joi.string().max(255).allow(null, "")
+        )
+        .optional(),
     }).min(1);
 
     const { error, value } = updateProfileSchema.validate(req.body, {
@@ -72,6 +115,10 @@ async function updateUserProfile(req, res) {
         success: false,
         message: error.details[0].message,
       });
+    }
+
+    if (Object.prototype.hasOwnProperty.call(value, "interests")) {
+      value.interests = normalizeInterests(value.interests);
     }
 
     //  Check session
@@ -144,6 +191,7 @@ async function updateUserProfile(req, res) {
       "looking_for",
       "height",
       "education",
+      "interests",
     ];
 
     const updates = {};
@@ -176,6 +224,8 @@ async function updateUserProfile(req, res) {
       looking_for: user.looking_for,
       height: user.height,
       education: user.education,
+      interests: parseInterests(user.interests),
+
       coins: user.coins,
       total_likes: user.total_likes,
       total_matches: user.total_matches,

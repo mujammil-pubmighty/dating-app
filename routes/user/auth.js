@@ -8,7 +8,6 @@ const userController = require("../../controllers/user/userController");
 const chatController = require("../../controllers/user/chatController");
 const adsController = require("../../controllers/user/adViewController");
 const { fileUploader } = require("../../utils/helpers/fileUpload");
-
 const {
   initiateVideoCall,
   acceptVideoCall,
@@ -17,6 +16,13 @@ const {
   getVideoCallStatus,
   getVideoCallHistory,
 } = require("../../controllers/user/videoCallConroller");
+const {
+  uploadUserMedia,
+  getMyMedia,
+  deleteMyMedia,
+} = require("../../controllers/user/userMediaController");
+
+
 
 router.get("/setting", utilController.getAllOptions);
 
@@ -78,6 +84,12 @@ router.post("/video-calls/:callId/reject", rejectVideoCall);
 router.post("/video-calls/:callId/end", endVideoCall);
 router.get("/video-calls/:callId/status", getVideoCallStatus);
 router.get("/video-calls", getVideoCallHistory);
+
+// user media helper path
+router.post("/media", fileUploader.single("file"), uploadUserMedia);
+router.get("/media", getMyMedia);
+router.post("/media/:id", deleteMyMedia);
+
 
 module.exports = router;
 
