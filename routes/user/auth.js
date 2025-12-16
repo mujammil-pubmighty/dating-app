@@ -68,14 +68,16 @@ router.post(
   fileUploader.single("avatar"),
   userController.updateUserProfile
 );
+router.get("/profile", userController.getUserProfile);
 
 //ads view
 router.get("/ads/status", adsController.getAdStatus);
 router.post("/ads/complete", adsController.completeAdView);
 
 //settings
-router.get("/settings", userController.getUserSettings);
+
 router.post("/settings", userController.updateUserSettings);
+router.get("/settings", userController.getUserSettings);
 
 //video call
 router.post("/chats/:chatId/video-calls/initiate", initiateVideoCall);

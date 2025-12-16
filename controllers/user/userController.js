@@ -915,7 +915,7 @@ async function getRandomPersons(req, res) {
   }
 }
 
-async function getUserSettings(req, res) {
+async function getUserProfile(req, res) {
   const transaction = await sequelize.transaction();
 
   const normalizeInterests = (raw) => {
@@ -1378,6 +1378,42 @@ async function updateUserSettings(req, res) {
     });
   }
 }
+
+async function getUserSettings(req, res) {
+  try {
+    // Validate session
+    const session = await isUserSessionValid(req);
+    if (!session.success) {
+      return res.status(401).json(session);
+    }
+    const userId = Number(session.data);
+
+    // Find settings
+    let settings = await UserSetting.findOne({
+      where: { user_id: userId },
+    });
+    // If not found, create with defaults
+    if (!settings) {
+      settings = await UserSetting.create({
+        user_id: userId,
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "User settings fetched successfully",
+      data: {
+        settings,
+      },
+    });
+  } catch (err) {
+    console.error("getUserSettings error:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+    });
+  }
+}
 module.exports = {
   getPackages,
   getAllPersons,
@@ -1386,6 +1422,7 @@ module.exports = {
   getRandomPersons,
   changePassword,
   updateUserProfile,
-  getUserSettings,
+  getUserProfile,
   updateUserSettings,
+  getUserSettings
 };
