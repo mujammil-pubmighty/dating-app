@@ -1011,25 +1011,25 @@ async function getUserProfile(req, res) {
       interests: Joi.array().items(Joi.string().max(50)).max(6).optional(),
     });
 
-    const { error, value } = updateProfileSchema.validate(req.body, {
-      abortEarly: true,
-      stripUnknown: true,
-    });
+    const { error, value: validated } = updateProfileSchema.validate(req.body || {}, {
+  abortEarly: true,
+  stripUnknown: true,
+});
 
-    if (error) {
-      if (req.file) await cleanupTempFiles([req.file]).catch(() => {});
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: error.details[0].message,
-      });
-    }
+if (error) {
+  if (req.file) await cleanupTempFiles([req.file]).catch(() => {});
+  await transaction.rollback();
+  return res.status(400).json({
+    success: false,
+    message: error.details[0].message,
+  });
+}
+const value = validated || {}; 
 
-    // normalize interests (array -> csv)
-    if (Object.prototype.hasOwnProperty.call(value, "interests")) {
-      value.interests = normalizeInterests(value.interests);
-    }
-
+// normalize interests (array -> csv)
+if (Object.prototype.hasOwnProperty.call(value, "interests")) {
+  value.interests = normalizeInterests(value.interests);
+}
     // Session check (same as ref)
     const sessionResult = await isUserSessionValid(req);
     if (!sessionResult.success) {

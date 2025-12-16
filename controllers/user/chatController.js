@@ -248,9 +248,9 @@ async function sendMessage(req, res) {
 
       if (freshReceiver && freshReceiver.type === "bot") {
         const fallbackMessages = [
-          "Hey! I’m here ",
+          "Hey! I'm here ",
           "I was thinking about you just now.",
-          "Tell me more, I’m really curious.",
+          "Tell me more, I'm really curious.",
           "That sounds interesting, go on ",
           "You make this chat more fun!",
         ];
