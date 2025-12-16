@@ -242,8 +242,7 @@ async function sendMessage(req, res) {
 
     await transaction.commit();
 
-  
-   setTimeout(async () => { try {
+    try {
       const freshReceiver = await User.findByPk(receiverId);
 
       if (freshReceiver && freshReceiver.type === "bot") {
@@ -300,7 +299,7 @@ async function sendMessage(req, res) {
       }
     } catch (errBot) {
       console.error("[sendMessage] Bot error:", errBot);
-    }}, 4000);
+    }
 
     return res.json({
       success: true,
