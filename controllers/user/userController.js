@@ -16,14 +16,13 @@ const {
   deleteFile,
   cleanupTempFiles,
 } = require("../../utils/helpers/fileUpload");
-const { Op,Sequelize } = require("sequelize");
+const { Op, Sequelize } = require("sequelize");
 const { compressImage } = require("../../utils/helpers/imageCompressor");
-
 
 async function updateUserProfile(req, res) {
   const transaction = await sequelize.transaction();
 
- const normalizeInterests = (raw) => {
+  const normalizeInterests = (raw) => {
     if (!raw) return null;
 
     let arr = [];
@@ -36,9 +35,7 @@ async function updateUserProfile(req, res) {
       return null;
     }
 
-    let interests = arr
-      .map((v) => String(v).trim())
-      .filter(Boolean);
+    let interests = arr.map((v) => String(v).trim()).filter(Boolean);
 
     interests = [...new Set(interests)];
 
@@ -93,10 +90,8 @@ async function updateUserProfile(req, res) {
 
       height: Joi.string().max(250).optional().allow(null),
       education: Joi.string().max(200).optional().allow(null, ""),
-      interests: Joi.array()
-      .items(Joi.string().max(50))
-      .max(6)
-      .optional(),  }).min(1);
+      interests: Joi.array().items(Joi.string().max(50)).max(6).optional(),
+    }).min(1);
 
     const { error, value } = updateProfileSchema.validate(req.body, {
       abortEarly: true,
@@ -866,7 +861,7 @@ async function getRandomPersons(req, res) {
             AND ui4.target_user_id = ${USER_ALIAS}.id
             AND ui4.action = 'like'
         )`
-      : "FALSE"; 
+      : "FALSE";
 
     const { rows, count } = await User.findAndCountAll({
       where: whereCondition,
@@ -931,9 +926,7 @@ async function getUserProfile(req, res) {
       return null;
     }
 
-    let interests = arr
-      .map((v) => String(v).trim())
-      .filter(Boolean);
+    let interests = arr.map((v) => String(v).trim()).filter(Boolean);
 
     interests = [...new Set(interests)];
     interests = interests.slice(0, 6);
@@ -953,7 +946,6 @@ async function getUserProfile(req, res) {
 
   try {
     if (req.file) {
-      
       const verifyResult = await verifyFileType(req.file, [
         "image/png",
         "image/jpeg",
@@ -973,7 +965,7 @@ async function getUserProfile(req, res) {
       }
 
       const result = await compressImage(req.file.path, "avatar");
-   
+
       req.body.avatar = result.filename;
     }
 
@@ -1011,25 +1003,27 @@ async function getUserProfile(req, res) {
       interests: Joi.array().items(Joi.string().max(50)).max(6).optional(),
     });
 
-    const { error, value: validated } = updateProfileSchema.validate(req.body || {}, {
-  abortEarly: true,
-  stripUnknown: true,
-});
+    const { error, value: validated } = updateProfileSchema.validate(
+      req.body || {},
+      {
+        abortEarly: true,
+        stripUnknown: true,
+      }
+    );
 
-if (error) {
-  if (req.file) await cleanupTempFiles([req.file]).catch(() => {});
-  await transaction.rollback();
-  return res.status(400).json({
-    success: false,
-    message: error.details[0].message,
-  });
-}
-const value = validated || {}; 
+    if (error) {
+      if (req.file) await cleanupTempFiles([req.file]).catch(() => {});
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message,
+      });
+    }
+    const value = validated || {};
 
-// normalize interests (array -> csv)
-if (Object.prototype.hasOwnProperty.call(value, "interests")) {
-  value.interests = normalizeInterests(value.interests);
-}
+    if (Object.prototype.hasOwnProperty.call(value, "interests")) {
+      value.interests = normalizeInterests(value.interests);
+    }
     // Session check (same as ref)
     const sessionResult = await isUserSessionValid(req);
     if (!sessionResult.success) {
@@ -1424,5 +1418,5 @@ module.exports = {
   updateUserProfile,
   getUserProfile,
   updateUserSettings,
-  getUserSettings
+  getUserSettings,
 };

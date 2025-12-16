@@ -242,8 +242,8 @@ async function sendMessage(req, res) {
 
     await transaction.commit();
 
-    // BOT REPLY (NO socket) -> also increments unread for user (same logic)
-    try {
+  
+   setTimeout(async () => { try {
       const freshReceiver = await User.findByPk(receiverId);
 
       if (freshReceiver && freshReceiver.type === "bot") {
@@ -300,7 +300,7 @@ async function sendMessage(req, res) {
       }
     } catch (errBot) {
       console.error("[sendMessage] Bot error:", errBot);
-    }
+    }}, 4000);
 
     return res.json({
       success: true,
