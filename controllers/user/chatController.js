@@ -22,8 +22,6 @@ const { compressImage } = require("../../utils/helpers/imageCompressor");
 async function sendMessage(req, res) {
   const transaction = await Message.sequelize.transaction();
 
-  let lastReadMessageId = null;
-  let updatedReadCount = 0;
   let newMsg = null;
   let botMessageSaved = null;
 
@@ -45,18 +43,19 @@ async function sendMessage(req, res) {
     if (!chatId || Number.isNaN(chatId)) {
       await transaction.rollback();
       await cleanupTempFiles([file]);
-      return res
-        .status(400)
-        .json({ success: false, message: "chatId required" });
+      return res.status(400).json({ success: false, message: "chatId required" });
     }
 
-    const chat = await Chat.findByPk(chatId, { transaction });
+    // lock chat row for safe unread count update
+    const chat = await Chat.findByPk(chatId, {
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+
     if (!chat) {
       await transaction.rollback();
       await cleanupTempFiles([file]);
-      return res
-        .status(404)
-        .json({ success: false, message: "Chat not found" });
+      return res.status(404).json({ success: false, message: "Chat not found" });
     }
 
     const isUserP1 = chat.participant_1_id === userId;
@@ -65,13 +64,10 @@ async function sendMessage(req, res) {
     if (!isUserP1 && !isUserP2) {
       await transaction.rollback();
       await cleanupTempFiles([file]);
-      return res
-        .status(403)
-        .json({ success: false, message: "Not in this chat" });
+      return res.status(403).json({ success: false, message: "Not in this chat" });
     }
 
     const myStatus = isUserP1 ? chat.chat_status_p1 : chat.chat_status_p2;
-
     if (myStatus === "blocked") {
       await transaction.rollback();
       await cleanupTempFiles([file]);
@@ -82,15 +78,9 @@ async function sendMessage(req, res) {
       });
     }
 
-    if (!isUserP1 && !isUserP2) {
-      await cleanupTempFiles([file]);
-      return res
-        .status(403)
-        .json({ success: false, message: "Not in this chat" });
-    }
-
     const receiverId = isUserP1 ? chat.participant_2_id : chat.participant_1_id;
 
+    // MARK MY RECEIVED MESSAGES AS READ (if any)
     {
       const where = {
         chat_id: chatId,
@@ -99,11 +89,7 @@ async function sendMessage(req, res) {
       };
 
       const [updatedCount] = await Message.update(
-        {
-          is_read: true,
-          read_at: new Date(),
-          status: "read",
-        },
+        { is_read: true, read_at: new Date(), status: "read" },
         { where, transaction }
       );
 
@@ -111,39 +97,25 @@ async function sendMessage(req, res) {
 
       if (updatedCount > 0) {
         const lastRead = await Message.findOne({
-          where: {
-            chat_id: chatId,
-            receiver_id: userId,
-            is_read: true,
-          },
+          where: { chat_id: chatId, receiver_id: userId, is_read: true },
           order: [["id", "DESC"]],
           transaction,
         });
 
-        if (lastRead) {
-          lastReadMessageId = lastRead.id;
-        }
+        if (lastRead) lastReadMessageId = lastRead.id;
 
-        // Reset unread count for THIS user
-        if (isUserP1) {
-          chat.unread_count_p1 = 0;
-        } else if (isUserP2) {
-          chat.unread_count_p2 = 0;
-        }
+        // reset unread count for me in chat table (optional but good)
+        if (isUserP1) chat.unread_count_p1 = 0;
+        else chat.unread_count_p2 = 0;
 
         await chat.save({ transaction });
       }
     }
 
-    // MESSAGE TYPE + FILE HANDLING
-
-    let finalMessageType = (
-      messageType || (file ? "image" : "text")
-    ).toLowerCase();
-
+    // MESSAGE TYPE + FILE HANDLING (your logic)
+    let finalMessageType = (messageType || (file ? "image" : "text")).toLowerCase();
     const allowedTypes = ["text", "image"];
-    if (!allowedTypes.includes(finalMessageType))
-      finalMessageType = file ? "image" : "text";
+    if (!allowedTypes.includes(finalMessageType)) finalMessageType = file ? "image" : "text";
 
     let finalMediaFilename = null;
     let finalMediaType = null;
@@ -153,20 +125,13 @@ async function sendMessage(req, res) {
       if (!textBody || !textBody.trim()) {
         await transaction.rollback();
         await cleanupTempFiles([file]);
-        return res
-          .status(400)
-          .json({ success: false, message: "Text message is empty" });
+        return res.status(400).json({ success: false, message: "Text message is empty" });
       }
-      // No file needed for text
       await cleanupTempFiles([file]);
-    
-
     } else {
       if (!file) {
         await transaction.rollback();
-        return res
-          .status(400)
-          .json({ success: false, message: "Image file is required" });
+        return res.status(400).json({ success: false, message: "Image file is required" });
       }
 
       const detect = await verifyFileType(file, [
@@ -181,20 +146,16 @@ async function sendMessage(req, res) {
       if (!detect || !detect.ok) {
         await transaction.rollback();
         await cleanupTempFiles([file]);
-        return res
-          .status(400)
-          .json({ success: false, message: "Invalid image type" });
+        return res.status(400).json({ success: false, message: "Invalid image type" });
       }
 
       const compressed = await compressImage(file.path, "chat");
-
       finalMediaFilename = compressed.filename;
       finalMediaType = "image";
       finalFileSize = file.size;
     }
 
-    // COINS
-
+    // COINS (your logic)
     const optionValue = await getOption("cost_per_message", 10);
     let messageCost = parseInt(optionValue ?? 0, 10);
     if (Number.isNaN(messageCost)) messageCost = 0;
@@ -214,7 +175,6 @@ async function sendMessage(req, res) {
     }
 
     // REPLY CHECK
-
     let repliedMessage = null;
     if (replyToMessageId) {
       repliedMessage = await Message.findOne({
@@ -223,8 +183,7 @@ async function sendMessage(req, res) {
       });
     }
 
-   
-
+    // CREATE MESSAGE (UNREAD FOR RECEIVER)
     newMsg = await Message.create(
       {
         chat_id: chat.id,
@@ -240,8 +199,8 @@ async function sendMessage(req, res) {
         reply_id: repliedMessage ? repliedMessage.id : null,
         sender_type: "real",
 
-        // Always unread from receiver's point of view
-        is_read: true,
+        // important
+        is_read: false,
         read_at: null,
         status: "sent",
 
@@ -252,10 +211,7 @@ async function sendMessage(req, res) {
     );
 
     if (messageCost > 0) {
-      await sender.update(
-        { coins: sender.coins - messageCost },
-        { transaction }
-      );
+      await sender.update({ coins: sender.coins - messageCost }, { transaction });
 
       await CoinSpentTransaction.create(
         {
@@ -269,9 +225,24 @@ async function sendMessage(req, res) {
       );
     }
 
-    // Commit DB transaction
+    // UPDATE CHAT: last message + increment unread for receiver
+    const chatUpdate = {
+      last_message_id: newMsg.id,
+      last_message_time: new Date(),
+    };
+
+    // receiver side unread increment
+    if (receiverId === chat.participant_1_id) {
+      chatUpdate.unread_count_p1 = (chat.unread_count_p1 || 0) + 1;
+    } else {
+      chatUpdate.unread_count_p2 = (chat.unread_count_p2 || 0) + 1;
+    }
+
+    await chat.update(chatUpdate, { transaction });
+
     await transaction.commit();
 
+    // BOT REPLY (NO socket) -> also increments unread for user (same logic)
     try {
       const freshReceiver = await User.findByPk(receiverId);
 
@@ -285,7 +256,6 @@ async function sendMessage(req, res) {
         ];
 
         let botReplyText = null;
-
         try {
           botReplyText = await generateBotReplyForChat(chat.id, textBody || "");
         } catch (aiErr) {
@@ -293,13 +263,9 @@ async function sendMessage(req, res) {
         }
 
         if (!botReplyText || !botReplyText.toString().trim()) {
-          botReplyText =
-            fallbackMessages[
-              Math.floor(Math.random() * fallbackMessages.length)
-            ];
+          botReplyText = fallbackMessages[Math.floor(Math.random() * fallbackMessages.length)];
         }
 
-        // SAVE BOT MESSAGE
         botMessageSaved = await Message.create({
           chat_id: chat.id,
           sender_id: receiverId,
@@ -318,40 +284,29 @@ async function sendMessage(req, res) {
           file_size: null,
         });
 
-        // UPDATE CHAT UNREAD FOR THIS USER (they now have a new unread bot msg)
-        const botUpdateData = {
+        const botUpdate = {
           last_message_id: botMessageSaved.id,
           last_message_time: new Date(),
         };
 
-        let delayMs = 0;
-        if (botMessageSaved && botMessageSaved.message) {
-          const typing = typingTime(botMessageSaved.message, 80);
-          delayMs = typing.milliseconds;
-        }
-
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
-
-        if (isUserP1) {
-          botUpdateData.unread_count_p1 = (chat.unread_count_p1 || 0) + 1;
+        // userId is receiver of bot msg → increment unread for this user
+        if (userId === chat.participant_1_id) {
+          botUpdate.unread_count_p1 = (chat.unread_count_p1 || 0) + 1;
         } else {
-          botUpdateData.unread_count_p2 = (chat.unread_count_p2 || 0) + 1;
+          botUpdate.unread_count_p2 = (chat.unread_count_p2 || 0) + 1;
         }
 
-        await Chat.update(botUpdateData, { where: { id: chat.id } });
-
-       
+        await Chat.update(botUpdate, { where: { id: chat.id } });
       }
     } catch (errBot) {
       console.error("[sendMessage] Bot error:", errBot);
-      // don't fail main response if bot fails
     }
 
     return res.json({
       success: true,
       message: "Message sent",
       data: newMsg,
-    }); 
+    });
   } catch (err) {
     console.error("sendMessage error:", err);
     await transaction.rollback();
@@ -360,17 +315,18 @@ async function sendMessage(req, res) {
   }
 }
 
+
 async function getChatMessages(req, res) {
+  const transaction = await Message.sequelize.transaction();
+
   try {
-    // Validate params
     const schema = Joi.object({
       chatId: Joi.number().integer().required(),
-      page: Joi.number().integer().default(1),
-      limit: Joi.number().integer().default(25),
     });
 
-    const { error, value } = schema.validate(req.params, { convert: true });
+    const { error } = schema.validate(req.params, { convert: true });
     if (error) {
+      await transaction.rollback();
       return res.status(400).json({
         success: false,
         message: error.details[0].message,
@@ -379,43 +335,70 @@ async function getChatMessages(req, res) {
 
     const chatId = Number(req.params.chatId);
     const page = Number(req.query.page || 1);
-    const limit = Number(req.query.limit || 500);
+    const limit = Number(req.query.limit || 50);
     const offset = (page - 1) * limit;
 
-    // Check user session
     const sessionResult = await isUserSessionValid(req);
     if (!sessionResult.success) {
+      await transaction.rollback();
       return res.status(401).json(sessionResult);
     }
     const userId = Number(sessionResult.data);
 
-    // Find chat
-    const chat = await Chat.findByPk(chatId);
+    // lock chat row to safely update unread_count_p1/p2
+    const chat = await Chat.findByPk(chatId, {
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+
     if (!chat) {
-      return res.status(404).json({
-        success: false,
-        message: "Chat not found",
-      });
+      await transaction.rollback();
+      return res.status(404).json({ success: false, message: "Chat not found" });
     }
 
-    // Check user is part of the chat
     if (chat.participant_1_id !== userId && chat.participant_2_id !== userId) {
+      await transaction.rollback();
       return res.status(403).json({
         success: false,
         message: "You are not allowed to view this chat",
       });
     }
 
-    // Fetch messages with pagination
+    // Fetch messages
     const { count, rows } = await Message.findAndCountAll({
       where: {
         chat_id: chatId,
         status: { [Op.ne]: "deleted" },
       },
-      order: [["created_at", "ASC"]],
+      order: [["id", "ASC"]],
       limit,
       offset,
+      transaction,
     });
+    const [updatedCount] = await Message.update(
+      {
+        is_read: true,
+        read_at: new Date(),
+        status: "read",
+      },
+      {
+        where: {
+          chat_id: chatId,
+          receiver_id: userId,
+          is_read: false,
+          status: { [Op.ne]: "deleted" },
+        },
+        transaction,
+      }
+    );
+    if (chat.participant_1_id === userId) {
+      chat.unread_count_p1 = 0;
+    } else {
+      chat.unread_count_p2 = 0;
+    }
+    await chat.save({ transaction });
+
+    await transaction.commit();
 
     return res.json({
       success: true,
@@ -428,16 +411,22 @@ async function getChatMessages(req, res) {
           limit,
           totalPages: Math.ceil(count / limit),
         },
+        read: {
+          updatedCount, // how many became read on open
+          unreadCount: 0,
+        },
       },
     });
   } catch (err) {
     console.error("getChatMessages Error:", err);
+    await transaction.rollback();
     return res.status(500).json({
       success: false,
       message: "Internal server error",
     });
   }
 }
+
 
 async function getUserChats(req, res) {
   try {
@@ -446,7 +435,7 @@ async function getUserChats(req, res) {
       limit: Joi.number().integer().default(20),
     }).unknown(true);
 
-    const { error, value } = schema.validate(req.query);
+    const { error, value } = schema.validate(req.query, { abortEarly: true });
     if (error) {
       return res.status(400).json({
         success: false,
@@ -462,70 +451,16 @@ async function getUserChats(req, res) {
     if (!session.success) return res.status(401).json(session);
     const userId = Number(session.data);
 
-    const chats = await Chat.findAll({
+    // get chats (simple)
+    const { count, rows: chats } = await Chat.findAndCountAll({
       where: {
         [Op.or]: [
           { participant_1_id: userId, chat_status_p1: { [Op.ne]: "deleted" } },
           { participant_2_id: userId, chat_status_p2: { [Op.ne]: "deleted" } },
         ],
       },
-      attributes: [
-        "id",
-        "participant_1_id",
-        "participant_2_id",
-        "is_pin_p1",
-        "is_pin_p2",
-        [
-          Sequelize.literal(`(
-            SELECT COUNT(*)
-            FROM pb_messages AS m
-            WHERE 
-              m.chat_id = Chat.id
-              AND m.receiver_id = ${userId}
-              AND m.is_read = 0
-          )`),
-          "unread_count",
-        ],
-      ],
-
-      include: [
-        {
-          model: Message,
-          as: "messages",
-          attributes: [
-            "id",
-            "sender_id",
-            "receiver_id",
-            "message",
-            "message_type",
-            "created_at",
-            "is_read",
-          ],
-          separate: true,
-          limit: 1,
-          order: [["id", "DESC"]],
-        },
-      ],
-
-      order: [
-        [
-          Sequelize.literal(`
-            CASE
-              WHEN participant_1_id = ${userId} THEN is_pin_p1
-              WHEN participant_2_id = ${userId} THEN is_pin_p2
-              ELSE 0
-            END
-          `),
-          "DESC",
-        ],
-        [
-          Sequelize.literal(
-            "(SELECT MAX(created_at) FROM pb_messages WHERE chat_id = Chat.id)"
-          ),
-          "DESC",
-        ],
-      ],
-
+      attributes: ["id", "participant_1_id", "participant_2_id", "is_pin_p1", "is_pin_p2"],
+      order: [["updated_at", "DESC"]],
       limit,
       offset,
     });
@@ -534,19 +469,29 @@ async function getUserChats(req, res) {
 
     for (const chat of chats) {
       const otherUserId =
-        chat.participant_1_id === userId
-          ? chat.participant_2_id
-          : chat.participant_1_id;
+        chat.participant_1_id === userId ? chat.participant_2_id : chat.participant_1_id;
 
       const otherUser = await User.findByPk(otherUserId, {
         attributes: ["id", "username", "avatar", "is_active", "last_active"],
       });
 
-      const lastMessage = chat.messages[0] || null;
+      const lastMessage = await Message.findOne({
+        where: { chat_id: chat.id, status: { [Op.ne]: "deleted" } },
+        attributes: ["id", "message", "message_type", "created_at"],
+        order: [["id", "DESC"]],
+      });
+
+      const unreadCount = await Message.count({
+        where: {
+          chat_id: chat.id,
+          receiver_id: userId,
+          is_read: false,
+          status: { [Op.ne]: "deleted" },
+        },
+      });
 
       const isPinnedForUser =
         chat.participant_1_id === userId ? chat.is_pin_p1 : chat.is_pin_p2;
-      const unreadCount = Number(chat.get("unread_count") || 0);
 
       chatList.push({
         chat_id: chat.id,
@@ -554,7 +499,7 @@ async function getUserChats(req, res) {
         last_message: lastMessage ? lastMessage.message : null,
         last_message_type: lastMessage ? lastMessage.message_type : null,
         last_message_time: lastMessage ? lastMessage.created_at : null,
-        unread_count: unreadCount,   
+        unread_count: unreadCount,
         is_pin: !!isPinnedForUser,
       });
     }
@@ -567,7 +512,9 @@ async function getUserChats(req, res) {
         pagination: {
           page,
           limit,
-          hasMore: chatList.length === limit,
+          total: count,
+          totalPages: Math.ceil(count / limit),
+          hasMore: offset + chatList.length < count,
         },
       },
     });
@@ -779,12 +726,7 @@ async function markChatMessagesRead(req, res) {
       lastMessageId: Joi.number().integer().optional(),
     });
 
-    const input = {
-      chatId: req.params.chatId,
-      lastMessageId: req.body.lastMessageId,
-    };
-
-    const { error, value } = schema.validate(input, {
+    const { error, value } = schema.validate(req.body, {
       abortEarly: true,
       convert: true,
     });
@@ -799,24 +741,16 @@ async function markChatMessagesRead(req, res) {
     const { chatId, lastMessageId } = value;
 
     const sessionResult = await isUserSessionValid(req);
-    if (!sessionResult.success) {
-      return res.status(401).json(sessionResult);
-    }
+    if (!sessionResult.success) return res.status(401).json(sessionResult);
     const userId = Number(sessionResult.data);
 
     const chat = await Chat.findByPk(chatId);
     if (!chat) {
-      return res.status(404).json({
-        success: false,
-        message: "Chat not found",
-      });
+      return res.status(404).json({ success: false, message: "Chat not found" });
     }
 
     if (chat.participant_1_id !== userId && chat.participant_2_id !== userId) {
-      return res.status(403).json({
-        success: false,
-        message: "You are not allowed to update this chat",
-      });
+      return res.status(403).json({ success: false, message: "Not allowed" });
     }
 
     const where = {
@@ -825,43 +759,22 @@ async function markChatMessagesRead(req, res) {
       is_read: false,
     };
 
-    if (lastMessageId) {
-      where.id = { [Op.lte]: lastMessageId };
-    }
+    if (lastMessageId) where.id = { [Op.lte]: lastMessageId };
 
     const [updatedCount] = await Message.update(
-      {
-        is_read: true,
-        read_at: new Date(),
-        status: "read",
-      },
+      { is_read: true, read_at: new Date(), status: "read" },
       { where }
     );
 
-    const lastRead = await Message.findOne({
-      where: {
-        chat_id: chatId,
-        receiver_id: userId,
-        is_read: true,
-      },
-      order: [["id", "DESC"]],
-    });
     const remainingUnread = await Message.count({
-      where: {
-        chat_id: chatId,
-        receiver_id: userId,
-        is_read: false,
-      },
+      where: { chat_id: chatId, receiver_id: userId, is_read: false },
     });
 
-    if (global.io && updatedCount > 0 && lastRead) {
-      const room = `chat_${chatId}`;
-      global.io.to(room).emit("messages_read", {
-        chatId,
-        userId,
-        lastReadMessageId: lastRead.id,
-        unreadCount: remainingUnread,  
-      });
+    // reset stored count (optional)
+    if (chat.participant_1_id === userId) {
+      await chat.update({ unread_count_p1: remainingUnread });
+    } else {
+      await chat.update({ unread_count_p2: remainingUnread });
     }
 
     return res.json({
@@ -869,16 +782,12 @@ async function markChatMessagesRead(req, res) {
       message: "Messages marked as read",
       data: {
         updatedCount,
-        lastReadMessageId: lastRead ? lastRead.id : null,
-        unreadCount: remainingUnread,  
+        unreadCount: remainingUnread,
       },
     });
   } catch (err) {
     console.error("markChatMessagesRead error:", err);
-    return res.status(500).json({
-      success: false,
-      message: "Internal server error",
-    });
+    return res.status(500).json({ success: false, message: "Internal server error" });
   }
 }
 
