@@ -21,12 +21,14 @@ async function sendMessage(req, res) {
   const transaction = await Message.sequelize.transaction();
 
   let newMsg = null;
+  let botMessageSaved = null;
 
   try {
     const { chatId: chatIdParam } = req.params;
     const { message: textBody, replyToMessageId, messageType } = req.body;
     const file = req.file || null;
 
+    // SESSION CHECK
     const sessionResult = await isUserSessionValid(req);
     if (!sessionResult.success) {
       await transaction.rollback();
@@ -45,7 +47,7 @@ async function sendMessage(req, res) {
         .json({ success: false, message: "chatId required" });
     }
 
-    // lock chat row for safe unread count update
+    // LOCK CHAT ROW (important for unread counts correctness)
     const chat = await Chat.findByPk(chatId, {
       transaction,
       lock: transaction.LOCK.UPDATE,
@@ -81,36 +83,34 @@ async function sendMessage(req, res) {
 
     const receiverId = isUserP1 ? chat.participant_2_id : chat.participant_1_id;
 
-    {
-      const where = {
-        chat_id: chatId,
-        receiver_id: userId,
-        is_read: false,
-      };
+    // 1) MARK MY RECEIVED MESSAGES AS READ + RESET MY UNREAD COUNT
+    await Message.update(
+      { is_read: true, read_at: new Date(), status: "read" },
+      {
+        where: {
+          chat_id: chatId,
+          receiver_id: userId,
+          is_read: false,
+        },
+        transaction,
+      }
+    );
 
-      await Message.update(
-        { is_read: true, read_at: new Date(), status: "read" },
-        { where, transaction }
-      );
+    if (isUserP1) chat.unread_count_p1 = 0;
+    else chat.unread_count_p2 = 0;
 
-      if (isUserP1) chat.unread_count_p1 = 0;
-      else chat.unread_count_p2 = 0;
-
-      await chat.save({ transaction });
-    }
-
-    let finalMessageType = (
-      messageType ||
-      (file ? "image" : "text")
-    ).toLowerCase();
+    // 2) MESSAGE TYPE + FILE HANDLING
+    let finalMessageType = (messageType || (file ? "image" : "text")).toLowerCase();
     const allowedTypes = ["text", "image"];
-    if (!allowedTypes.includes(finalMessageType))
+    if (!allowedTypes.includes(finalMessageType)) {
       finalMessageType = file ? "image" : "text";
+    }
 
     let finalMediaFilename = null;
     let finalMediaType = null;
     let finalFileSize = null;
 
+    // TEXT
     if (finalMessageType === "text") {
       if (!textBody || !textBody.trim()) {
         await transaction.rollback();
@@ -120,7 +120,10 @@ async function sendMessage(req, res) {
           .json({ success: false, message: "Text message is empty" });
       }
       await cleanupTempFiles([file]);
-    } else {
+    }
+
+    // IMAGE
+    if (finalMessageType === "image") {
       if (!file) {
         await transaction.rollback();
         return res
@@ -151,7 +154,7 @@ async function sendMessage(req, res) {
       finalFileSize = file.size;
     }
 
-    // COINS
+    // 3) COINS
     const optionValue = await getOption("cost_per_message", 10);
     let messageCost = parseInt(optionValue ?? 0, 10);
     if (Number.isNaN(messageCost)) messageCost = 0;
@@ -170,7 +173,7 @@ async function sendMessage(req, res) {
       });
     }
 
-    // REPLY CHECK
+    // 4) REPLY CHECK
     let repliedMessage = null;
     if (replyToMessageId) {
       repliedMessage = await Message.findOne({
@@ -179,7 +182,7 @@ async function sendMessage(req, res) {
       });
     }
 
-    // CREATE MESSAGE (UNREAD FOR RECEIVER)
+    // 5) CREATE MY MESSAGE (UNREAD FOR RECEIVER)
     newMsg = await Message.create(
       {
         chat_id: chat.id,
@@ -192,6 +195,8 @@ async function sendMessage(req, res) {
         file_size: finalFileSize,
         reply_id: repliedMessage ? repliedMessage.id : null,
         sender_type: "real",
+
+        // IMPORTANT: receiver hasn't read it yet
         is_read: false,
         read_at: null,
         status: "sent",
@@ -202,6 +207,7 @@ async function sendMessage(req, res) {
       { transaction }
     );
 
+    // 6) DEDUCT COINS
     if (messageCost > 0) {
       await sender.update({ coins: sender.coins - messageCost }, { transaction });
 
@@ -217,38 +223,34 @@ async function sendMessage(req, res) {
       );
     }
 
-    // UPDATE CHAT: last message + increment unread for receiver
+    // 7) UPDATE CHAT: last message + increment UNREAD for receiver (atomic)
     const chatUpdate = {
       last_message_id: newMsg.id,
       last_message_time: new Date(),
     };
 
     if (receiverId === chat.participant_1_id) {
-      chatUpdate.unread_count_p1 = (chat.unread_count_p1 || 0) + 1;
+      chatUpdate.unread_count_p1 = Sequelize.literal("unread_count_p1 + 1");
     } else {
-      chatUpdate.unread_count_p2 = (chat.unread_count_p2 || 0) + 1;
+      chatUpdate.unread_count_p2 = Sequelize.literal("unread_count_p2 + 1");
     }
 
-    await chat.update(chatUpdate, { transaction });
+    await Chat.update(chatUpdate, { where: { id: chat.id }, transaction });
+
+    // Save my unread reset change too
+    await chat.save({ transaction });
+
     await transaction.commit();
 
-    res.json({
-      success: true,
-      message: "Message sent",
-      data: newMsg,
-    });
-
-    const delayMs = 3000;
-    setTimeout(async () => {
-      try {
-        const freshReceiver = await User.findByPk(receiverId);
-        if (!freshReceiver || freshReceiver.type !== "bot") return;
-
+    // 8) BOT REPLY (OLD BEHAVIOR: WAIT DELAY THEN RETURN BOT IN RESPONSE)
+    try {
+      const freshReceiver = await User.findByPk(receiverId);
+      if (freshReceiver && freshReceiver.type === "bot") {
         const fallbackMessages = [
-          "Hey! I'm here ",
+          "Hey! I’m here ",
           "I was thinking about you just now.",
-          "Tell me more, I'm really curious.",
-          "That sounds interesting, go on ",
+          "Tell me more, I’m really curious.",
+          "That sounds interesting, go on",
           "You make this chat more fun!",
         ];
 
@@ -256,7 +258,7 @@ async function sendMessage(req, res) {
         try {
           botReplyText = await generateBotReplyForChat(chat.id, textBody || "");
         } catch (aiErr) {
-          console.error("[sendMessage] AI bot reply error:", aiErr);
+          console.error("[sendMessage] AI reply error:", aiErr);
         }
 
         if (!botReplyText || !botReplyText.toString().trim()) {
@@ -264,7 +266,20 @@ async function sendMessage(req, res) {
             fallbackMessages[Math.floor(Math.random() * fallbackMessages.length)];
         }
 
-        const botMessageSaved = await Message.create({
+        // typing delay based on message length
+        let delayMs = 0;
+        try {
+          const typing = typingTime(botReplyText, 80); // your helper
+          delayMs = typing?.milliseconds ?? 0;
+        } catch (e) {
+          delayMs = 2500;
+        }
+
+        if (delayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+
+        botMessageSaved = await Message.create({
           chat_id: chat.id,
           sender_id: receiverId,
           receiver_id: userId,
@@ -282,32 +297,39 @@ async function sendMessage(req, res) {
           file_size: null,
         });
 
-        const botUpdate = {
+        // Update chat + increment unread for the real user (atomic)
+        const botChatUpdate = {
           last_message_id: botMessageSaved.id,
           last_message_time: new Date(),
         };
 
-        // increment unread for the real user safely
         if (userId === chat.participant_1_id) {
-          botUpdate.unread_count_p1 = Sequelize.literal("unread_count_p1 + 1");
+          botChatUpdate.unread_count_p1 = Sequelize.literal("unread_count_p1 + 1");
         } else {
-          botUpdate.unread_count_p2 = Sequelize.literal("unread_count_p2 + 1");
+          botChatUpdate.unread_count_p2 = Sequelize.literal("unread_count_p2 + 1");
         }
 
-        await Chat.update(botUpdate, { where: { id: chat.id } });
-      } catch (errBot) {
-        console.error("[sendMessage] Bot error:", errBot);
+        await Chat.update(botChatUpdate, { where: { id: chat.id } });
       }
-    }, delayMs);
+    } catch (errBot) {
+      console.error("[sendMessage] Bot error:", errBot);
+    }
 
-    return;
+    return res.json({
+      success: true,
+      message: "Message sent",
+      data: {
+        user: newMsg,
+        bot: botMessageSaved,
+      },
+    });
   } catch (err) {
     console.error("sendMessage error:", err);
-    await transaction.rollback();
+    try {
+      await transaction.rollback();
+    } catch (_) {}
     await cleanupTempFiles([req.file]);
-    return res
-      .status(500)
-      .json({ success: false, message: "Server error" });
+    return res.status(500).json({ success: false, message: "Server error" });
   }
 }
 
@@ -478,7 +500,23 @@ async function getUserChats(req, res) {
           : chat.participant_1_id;
 
       const otherUser = await User.findByPk(otherUserId, {
-        attributes: ["id", "username", "avatar", "is_active", "last_active"],
+        attributes: [
+          "id", 
+          "username",
+           "avatar",
+           "is_active",
+           "last_active",
+           "bio",
+           "email",
+           "phone",
+           "gender",
+           "country",
+           "dob",
+           "intrests",
+           "looking_for",
+           "height",
+           "education" 
+        ],
       });
 
       const lastMessage = await Message.findOne({
