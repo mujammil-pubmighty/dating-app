@@ -537,7 +537,7 @@ async function getUserChats(req, res) {
         last_message_time: chat.last_message_time || (lastMessage ? lastMessage.created_at : null),
         unread_count: unreadCount,
         is_pin: !!isPinnedForUser,
-      });
+      }); //changes 
     }
 
     return res.json({
