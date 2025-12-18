@@ -956,6 +956,8 @@ async function getUserChats(req, res) {
         "is_pin_p1",
         "is_pin_p2",
         "updated_at",
+        "chat_status_p1",
+        "chat_status_p2", 
       ],
       order: [
         [pinOrderLiteral, "DESC"],
@@ -1018,7 +1020,7 @@ async function getUserChats(req, res) {
         last_message_time: chat.last_message_time || (lastMessage ? lastMessage.created_at : null),
         unread_count: unreadCount,
         is_pin: !!isPinnedForUser,
-        is_block: !!chat.is_block, 
+        is_block:chat.chat_status_p1,
       }); //changes 
     }
 
