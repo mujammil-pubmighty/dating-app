@@ -10,6 +10,10 @@ const adsController = require("../../controllers/user/adViewController");
 const { fileUploader } = require("../../utils/helpers/fileUpload");
 const videoCallConroller = require("../../controllers/user/videoCallConroller");
 const mediaController = require("../../controllers/user/userMediaController");
+const {
+  verifyGooglePlayPurchase,
+} = require("../../controllers/user/googleBillingController");
+
 
 //options setting
 router.get("/setting", utilController.getAllOptions);
@@ -23,7 +27,11 @@ router.post("/forgot-password", authController.forgotPassword);
 router.post("/forgot-password/verify", authController.forgotPasswordVerify);
 
 //chatting between user1 & user2
-router.post("/chats/:chatId/messages",fileUploader.single("file"),chatController.sendMessage);
+router.post(
+  "/chats/:chatId/messages",
+  fileUploader.single("file"),
+  chatController.sendMessage
+);
 router.get("/chats/:chatId/messages", chatController.getChatMessages);
 router.get("/chats", chatController.getUserChats);
 router.get("/messages/:messageId", chatController.deleteMessage);
@@ -47,7 +55,11 @@ router.get("/persons", userController.getAllPersons);
 router.get("/persons/random", userController.getRandomPersons);
 router.get("/persons/recommended", userController.getRecommendedPersons);
 router.get("/persons/:id", userController.getPersonById);
-router.post("/profile",fileUploader.single("avatar"),userController.updateUserProfile);
+router.post(
+  "/profile",
+  fileUploader.single("avatar"),
+  userController.updateUserProfile
+);
 router.get("/profile", userController.getUserProfile);
 
 //ads view
@@ -59,19 +71,29 @@ router.post("/settings", userController.updateUserSettings);
 router.get("/settings", userController.getUserSettings);
 
 //video call
-router.post("/chats/:chatId/video-calls/initiate", videoCallConroller.initiateVideoCall);
+router.post(
+  "/chats/:chatId/video-calls/initiate",
+  videoCallConroller.initiateVideoCall
+);
 router.post("/video-calls/:callId/accept", videoCallConroller.acceptVideoCall);
 router.post("/video-calls/:callId/reject", videoCallConroller.rejectVideoCall);
 router.post("/video-calls/:callId/end", videoCallConroller.endVideoCall);
-router.get("/video-calls/:callId/status", videoCallConroller.getVideoCallStatus);
+router.get(
+  "/video-calls/:callId/status",
+  videoCallConroller.getVideoCallStatus
+);
 router.get("/video-calls", videoCallConroller.getVideoCallHistory);
 
 // user media
-router.post("/media", fileUploader.single("file"), mediaController.uploadUserMedia);
+router.post(
+  "/media",
+  fileUploader.single("file"),
+  mediaController.uploadUserMedia
+);
 router.get("/media", mediaController.getMyMedia);
 router.post("/media/:id", mediaController.deleteMyMedia);
 
+//google billing 
+router.post("/billing/google-play/verify", verifyGooglePlayPurchase);
 
 module.exports = router;
-
-

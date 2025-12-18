@@ -35,7 +35,7 @@ const fileUploader = multer({
       cb(null, `temp-${uniqueSuffix}${path.extname(file.originalname)}`);
     },
   }),
-  limits: { fileSize: 4 * 1024 * 1024 }, // 4MB
+  limits: { fileSize: 400 * 1024 * 1024 }, // 4MB
 });
 
 // ---- SIMPLE IMAGE UPLOAD (WEBP) -------------------------------------------

@@ -246,6 +246,7 @@ function getUserAgentData(req) {
     userAgent: ua,
   };
 }
+
 function generateRandomUsername() {
   const prefix = "user";
   const randomNum = Math.floor(100000 + Math.random() * 900000); // 6-digit random number
@@ -266,6 +267,7 @@ function isValidEmail(email) {
   const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
   return emailRegex.test(email); // Returns true if it's a valid email, false otherwise
 }
+
 function isValidPhone(phone) {
   const phoneRegex = /^[0-9]{8,15}$/;
   return phoneRegex.test(phone);
@@ -373,6 +375,7 @@ function getDobRangeFromAges(minAge, maxAge) {
     maxDob: youngestDob,
   };
 }
+
 function normalizeParticipants(userIdA, userIdB) {
   const id1 = Number(userIdA);
   const id2 = Number(userIdB);
@@ -447,6 +450,7 @@ async function getOrCreateChatBetweenUsers(userIdA, userIdB, transaction) {
 
   return chat;
 }
+
 function validateCallParticipants(chat, callerId, receiverId) {
   const p1 = chat.participant_1_id;
   const p2 = chat.participant_2_id;
@@ -512,3 +516,16 @@ module.exports = {
   maskPhone,
   maskEmail
 };
+
+
+
+
+
+
+
+
+
+
+
+
+
