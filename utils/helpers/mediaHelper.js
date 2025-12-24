@@ -181,6 +181,7 @@ function buildProfileMediaUrl(filename) {
   if (!filename) return null;
   return `${PROFILE_MEDIA_WEB_PATH}/${filename}`;
 }
+
 async function moveUploadedFile(file, folder) {
   // example: uploads/chat_audio
   const uploadRoot = path.join(__dirname, "../../public/uploads");

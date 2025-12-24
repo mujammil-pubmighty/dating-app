@@ -476,7 +476,7 @@ async function sendMessage(req, res) {
     const chatId = Number(pVal.chatId);
     const file = req.file || null;
 
-    //  Session check
+    // Session check
     const sessionResult = await isUserSessionValid(req);
     if (!sessionResult.success) {
       await t.rollback();
@@ -522,23 +522,21 @@ async function sendMessage(req, res) {
 
     const receiverId = isUserP1 ? chat.participant_2_id : chat.participant_1_id;
 
-    {
-      await Message.update(
-        { is_read: true, read_at: new Date(), status: "read" },
-        {
-          where: { chat_id: chatId, receiver_id: userId, is_read: false },
-          transaction: t,
-        }
-      );
+    // Mark messages read for this user + reset unread count for this user
+    await Message.update(
+      { is_read: true, read_at: new Date(), status: "read" },
+      {
+        where: { chat_id: chatId, receiver_id: userId, is_read: false },
+        transaction: t,
+      }
+    );
 
-      if (isUserP1) chat.unread_count_p1 = 0;
-      else chat.unread_count_p2 = 0;
+    if (isUserP1) chat.unread_count_p1 = 0;
+    else chat.unread_count_p2 = 0;
 
-      await chat.save({ transaction: t });
-    }
+    await chat.save({ transaction: t });
 
     // Decide final message type
-
     let finalType = (bVal.messageType || "").toLowerCase().trim();
 
     if (!finalType) {
@@ -556,8 +554,6 @@ async function sendMessage(req, res) {
     }
 
     const captionOrText = (bVal.message || "").toString();
-
-    // Validate + prepare media
     let finalMediaUrl = null;
 
     const maxImageMB = parseInt(await getOption("max_chat_image_mb", 800), 10);
@@ -571,13 +567,14 @@ async function sendMessage(req, res) {
       if (!file) {
         throw Object.assign(
           new Error("File is required for this message type"),
-          { code: "FILE_REQUIRED" }
+          {
+            code: "FILE_REQUIRED",
+          }
         );
       }
     };
 
     if (finalType === "text") {
-      // text only
       if (!captionOrText.trim()) {
         await t.rollback();
         await cleanupTempFiles([file]);
@@ -589,7 +586,6 @@ async function sendMessage(req, res) {
     } else if (finalType === "image") {
       ensureFile();
 
-      // size check
       if (file.size > sizeLimitBytes(maxImageMB)) {
         await t.rollback();
         await cleanupTempFiles([file]);
@@ -599,7 +595,6 @@ async function sendMessage(req, res) {
         });
       }
 
-      // mime check
       const detect = await verifyFileType(file, [
         "image/png",
         "image/jpeg",
@@ -616,10 +611,9 @@ async function sendMessage(req, res) {
           .json({ success: false, message: "Invalid image type" });
       }
 
-      // compress + save
       const compressed = await compressImage(file.path, "chat");
-      finalMediaUrl = compressed.filename; // store just filename like you already do
-      await cleanupTempFiles([file]); // cleanup tmp
+      finalMediaUrl = compressed.filename;
+      await cleanupTempFiles([file]);
     } else if (finalType === "audio") {
       ensureFile();
 
@@ -632,14 +626,13 @@ async function sendMessage(req, res) {
         });
       }
 
-      // allow common voice note formats (android often sends audio/mpeg or audio/mp4 or audio/ogg)
       const detect = await verifyFileType(file, [
-        "audio/mpeg", // mp3
+        "audio/mpeg",
         "audio/mp3",
-        "audio/mp4", // m4a
+        "audio/mp4",
         "audio/aac",
-        "audio/ogg", // ogg/opus
-        "audio/webm", // webm audio
+        "audio/ogg",
+        "audio/webm",
         "audio/wav",
         "video/webm",
         "audio/weba",
@@ -653,7 +646,6 @@ async function sendMessage(req, res) {
           .json({ success: false, message: "Invalid audio type" });
       }
 
-      // move to final folder (no compression here)
       finalMediaUrl = await moveUploadedFile(file, "chat_audio");
     } else if (finalType === "video") {
       ensureFile();
@@ -669,10 +661,10 @@ async function sendMessage(req, res) {
 
       const detect = await verifyFileType(file, [
         "video/mp4",
-        "video/quicktime", // mov
+        "video/quicktime",
         "video/webm",
         "video/3gpp",
-        "video/x-matroska", // mkv
+        "video/x-matroska",
       ]);
       if (!detect || !detect.ok) {
         await t.rollback();
@@ -695,7 +687,6 @@ async function sendMessage(req, res) {
         });
       }
 
-      // allow common docs
       const detect = await verifyFileType(file, [
         "application/pdf",
         "application/zip",
@@ -720,7 +711,7 @@ async function sendMessage(req, res) {
         .json({ success: false, message: "Invalid messageType" });
     }
 
-    // 7) Coins logic (same as yours)
+    // Coins logic
     const optionValue = await getOption("cost_per_message", 10);
     let messageCost = parseInt(optionValue ?? 0, 10);
     if (Number.isNaN(messageCost)) messageCost = 0;
@@ -746,7 +737,7 @@ async function sendMessage(req, res) {
       });
     }
 
-    //  Reply check
+    // Reply check
     let repliedMessage = null;
     if (bVal.replyToMessageId) {
       repliedMessage = await Message.findOne({
@@ -755,8 +746,7 @@ async function sendMessage(req, res) {
       });
     }
 
-    // Create message
-    // For media messages: store caption in `message` (like WhatsApp)
+    // Create user message
     newMsg = await Message.create(
       {
         chat_id: chat.id,
@@ -800,7 +790,7 @@ async function sendMessage(req, res) {
       );
     }
 
-    // 11) Update chat counters + last message
+    // Update chat counters + last message
     const chatUpdate = {
       last_message_id: newMsg.id,
       last_message_time: new Date(),
@@ -816,82 +806,90 @@ async function sendMessage(req, res) {
 
     await t.commit();
 
-    // Respond immediately
-    res.json({
-      success: true,
-      message: "Message sent",
-      data: newMsg,
+    // If receiver is NOT bot -> respond now
+    const freshReceiver = await User.findByPk(receiverId);
+    const isBotReceiver = freshReceiver && freshReceiver.type === "bot";
+
+    if (!isBotReceiver) {
+      return res.json({
+        success: true,
+        message: "Message sent",
+        data: {
+          user_message: newMsg,
+          bot_message: null,
+        },
+      });
+    }
+
+    // Receiver is BOT -> wait then generate reply and respond with both
+    const delayMs = 3000;
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+
+    const fallbackMessages = [
+      "Hey! I'm here 🙂",
+      "I was thinking about you just now.",
+      "Tell me more, I'm really curious.",
+      "That sounds interesting, go on 🙂",
+      "You make this chat more fun!",
+    ];
+
+    let botReplyText = null;
+    try {
+      botReplyText = await generateBotReplyForChat(
+        chat.id,
+        captionOrText || ""
+      );
+    } catch (aiErr) {
+      console.error("[sendMessage] AI bot reply error:", aiErr);
+    }
+
+    if (!botReplyText || !botReplyText.toString().trim()) {
+      botReplyText =
+        fallbackMessages[Math.floor(Math.random() * fallbackMessages.length)];
+    }
+
+    const botMessageSaved = await Message.create({
+      chat_id: chat.id,
+      sender_id: receiverId,
+      receiver_id: userId,
+      message: botReplyText,
+      reply_id: newMsg.id,
+      message_type: "text",
+      sender_type: "bot",
+      is_read: false,
+      read_at: null,
+      status: "sent",
+      is_paid: false,
+      price: 0,
+      media_url: null,
     });
 
-    //BOT reply (your existing logic)
-    const delayMs = 3000;
-    setTimeout(async () => {
-      try {
-        const freshReceiver = await User.findByPk(receiverId);
-        if (!freshReceiver || freshReceiver.type !== "bot") return;
+    const botUpdate = {
+      last_message_id: botMessageSaved.id,
+      last_message_time: new Date(),
+    };
 
-        const fallbackMessages = [
-          "Hey! I'm here 🙂",
-          "I was thinking about you just now.",
-          "Tell me more, I'm really curious.",
-          "That sounds interesting, go on 🙂",
-          "You make this chat more fun!",
-        ];
+    if (userId === chat.participant_1_id) {
+      botUpdate.unread_count_p1 = Sequelize.literal("unread_count_p1 + 1");
+    } else {
+      botUpdate.unread_count_p2 = Sequelize.literal("unread_count_p2 + 1");
+    }
 
-        let botReplyText = null;
-        try {
-          botReplyText = await generateBotReplyForChat(
-            chat.id,
-            captionOrText || ""
-          );
-        } catch (aiErr) {
-          console.error("[sendMessage] AI bot reply error:", aiErr);
-        }
+    await Chat.update(botUpdate, { where: { id: chat.id } });
 
-        if (!botReplyText || !botReplyText.toString().trim()) {
-          botReplyText =
-            fallbackMessages[
-              Math.floor(Math.random() * fallbackMessages.length)
-            ];
-        }
-
-        const botMessageSaved = await Message.create({
-          chat_id: chat.id,
-          sender_id: receiverId,
-          receiver_id: userId,
-          message: botReplyText,
-          reply_id: newMsg.id,
-          message_type: "text",
-          sender_type: "bot",
-          is_read: false,
-          read_at: null,
-          status: "sent",
-          is_paid: false,
-          price: 0,
-          media_url: null,
-        });
-
-        const botUpdate = {
-          last_message_id: botMessageSaved.id,
-          last_message_time: new Date(),
-        };
-
-        if (userId === chat.participant_1_id) {
-          botUpdate.unread_count_p1 = Sequelize.literal("unread_count_p1 + 1");
-        } else {
-          botUpdate.unread_count_p2 = Sequelize.literal("unread_count_p2 + 1");
-        }
-
-        await Chat.update(botUpdate, { where: { id: chat.id } });
-      } catch (errBot) {
-        console.error("[sendMessage] Bot error:", errBot);
-      }
-    }, delayMs);
-
-    return;
+    return res.json({
+      success: true,
+      message: "Message sent (bot replied)",
+      data: {
+        user_message: newMsg,
+        bot_message: botMessageSaved,
+      },
+    });
   } catch (err) {
     console.error("sendMessage error:", err);
-    await t.rollback();
+    try {
+      await t.rollback();
+    } catch (_) {}
     await cleanupTempFiles([req.file]);
     return res.status(500).json({ success: false, message: "Server error" });
   }
