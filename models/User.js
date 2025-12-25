@@ -1,5 +1,5 @@
 const { DataTypes } = require("sequelize");
-const sequelize = require("../config/db"); 
+const sequelize = require("../config/db");
 
 const User = sequelize.define(
   "User",
@@ -76,7 +76,7 @@ const User = sequelize.define(
     bio: {
       type: DataTypes.TEXT,
     },
-     interests: {
+    interests: {
       type: DataTypes.TEXT,
       allowNull: true,
     },
@@ -156,20 +156,24 @@ const User = sequelize.define(
       type: DataTypes.DATE,
     },
 
-    created_at: {
-      type: DataTypes.DATE,
-      defaultValue: DataTypes.NOW,
+    google_id: {
+      type: DataTypes.STRING(300),
     },
 
-    updated_at: {
-      type: DataTypes.DATE,
-      defaultValue: DataTypes.NOW,
+    status: {
+      type: DataTypes.TINYINT.UNSIGNED,
+      allowNull: false,
+      defaultValue: 1,
+      validate: {
+        isIn: [[0, 1, 2, 3]],
+      },
+      comment: "0=pending, 1=active, 2=suspended, 3=disabled",
     },
   },
 
   {
     tableName: "pb_users",
-    timestamps: false,
+    timestamps: true,
     underscored: true,
     indexes: [
       { fields: ["email"] },

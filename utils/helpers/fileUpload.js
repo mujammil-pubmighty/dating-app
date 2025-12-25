@@ -3,66 +3,57 @@ const fs = require("fs-extra");
 const fsp = require("node:fs/promises"); // low-level fd.open/read
 const sharp = require("sharp");
 const multer = require("multer");
-const { getOption } = require("../helper");
-const { PDFDocument, PDFName } = require("pdf-lib");
+const { getOption } = require("./helper");
+const { PDFDocument, PDFName, PDFDict } = require("pdf-lib");
 const mimeTypes = require("mime-types");
 const AdmZip = require("adm-zip");
-const FileUpload = require("../../models/FileUpload");
-
-// ---- ROOT / PUBLIC / TMP --------------------------------------------------
-
-// PROJECT ROOT: .../Pubmighty API
-const ROOT_DIR = path.resolve(__dirname, "..", "..");
-// root/public
-const PUBLIC_DIR = path.join(ROOT_DIR, "public");
-// root/tmp
-const TMP_DIR = path.join(ROOT_DIR, "tmp");
-
-// ---- MULTER UPLOADER (TEMP FILES IN /tmp AT ROOT) -------------------------
+const FileUpload = require("../models/FileUpload");
+const { default: axios } = require("axios");
+const { MAX_AVATAR_BYTES, ALLOWED_MIME } = require("../staticValues");
+const { fileTypeFromBuffer } = require("file-type");
+const { randomFileName } = require("../helper");
 
 const fileUploader = multer({
   storage: multer.diskStorage({
     destination: function (req, file, cb) {
+      // ../tmp (sibling of public)
+      const tmpDir = path.join(__dirname, "..", "tmp");
       try {
-        fs.mkdirSync(TMP_DIR, { recursive: true });
+        fs.mkdirSync(tmpDir, { recursive: true });
       } catch (e) {
         return cb(e);
       }
-      cb(null, TMP_DIR);
+      cb(null, tmpDir);
     },
     filename: function (req, file, cb) {
       const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
       cb(null, `temp-${uniqueSuffix}${path.extname(file.originalname)}`);
     },
   }),
-  limits: { fileSize: 400 * 1024 * 1024 }, // 4MB
+  limits: { fileSize: 4 * 1024 * 1024 }, // 4MB
 });
-
-// ---- SIMPLE IMAGE UPLOAD (WEBP) -------------------------------------------
 
 async function uploadImage(file, folder) {
   if (!file) return null;
 
   // Unique safe name
   const filename = `PM-${Date.now()}-${Math.round(Math.random() * 1e9)}.webp`;
-
-  // folder, e.g. "upload/partner" → /root/public/upload/partner/PM-xxx.webp
-  const targetDir = path.join(PUBLIC_DIR, folder);
-  const uploadPath = path.join(targetDir, filename);
+  const uploadPath = path.resolve(__dirname, "..", "public", folder, filename);
 
   try {
     // Ensure directory exists
-    await fs.ensureDir(targetDir);
+    await fs.ensureDir(path.dirname(uploadPath));
 
     // Get compression quality (default 80)
     let quality = await getOption("compressQuality", 80);
+
     sharp.cache(false);
 
-    // Sharp pipeline with full metadata stripping, convert and compress image to WebP
+    // Sharp pipeline with full metadata stripping, convert and compress image to WebP before saving
     await sharp(file.path)
       .rotate() // auto-fix orientation safely (no EXIF needed)
       .webp({
-        quality: parseInt(quality, 10),
+        quality: parseInt(quality),
         effort: 6,
       })
       .toFile(uploadPath);
@@ -73,7 +64,7 @@ async function uploadImage(file, folder) {
     // Remove the temporary file after processing
     await fs.remove(file.path);
 
-    return filename;
+    return `${filename}`;
   } catch (err) {
     // In case of failure, remove temp safely
     try {
@@ -115,6 +106,7 @@ async function sanitizePdfBuffer(srcBytes) {
   newDoc.setCreator("");
 
   // 5) defensive: remove dangerous catalog entries if somehow present
+  // Work on the low-level trailer/root dictionary (newDoc.context.trailer.root)
   try {
     const root = newDoc.context.trailer.get(PDFName.of("Root"));
     if (root) {
@@ -139,6 +131,8 @@ async function sanitizePdfBuffer(srcBytes) {
     }
   } catch (err) {
     // ignore low-level cleanup errors; copying pages already removed most things
+    // but keep moving — we don't want sanitizer to crash for obscure PDFs
+    // console.warn("catalog cleanup skipped:", err);
   }
 
   // 6) save and return bytes
@@ -153,7 +147,7 @@ async function sanitizePdfBuffer(srcBytes) {
  * @param {object} file - Multer file object with .path and .originalname
  * @param {string} folder - folder under public (example: "images", "docs")
  * @param {string|null} detectedExt - optional extension (without dot) supplied by prior detection
- * @returns {Promise<string|{filename,folder,id}>} final filename info
+ * @returns {Promise<string>} final filename (without path)
  * @throws {Error} on failure
  */
 async function uploadFile(
@@ -170,7 +164,7 @@ async function uploadFile(
   if (!file || !file.path) throw new Error("Missing file");
 
   const tempPath = path.resolve(file.path);
-  const publicDir = PUBLIC_DIR;
+  const publicDir = path.resolve(__dirname, "..", "public");
   const destDir = path.join(publicDir, folder || "");
   await fs.ensureDir(destDir);
 
@@ -271,7 +265,7 @@ async function uploadFile(
       await fsp.chmod(finalPath, 0o444);
     } else if (isPdf) {
       const fileBytes = await fs.readFile(tempPath);
-      const cleaned = await sanitizePdfBuffer(fileBytes);
+      const cleaned = await sanitizePdfBuffer(fileBytes); // you must implement/import this
       outputExt = "pdf";
       filename = `PM-${Date.now()}-${Math.round(
         Math.random() * 1e9
@@ -323,15 +317,36 @@ async function uploadFile(
     // cleanup temp
     try {
       console.warn("tempPath: ", tempPath);
-      const res = await safeRemove(tempPath);
+      let res = await safeRemove(tempPath);
       console.warn("res: ", res);
     } catch (e) {
       console.warn(e);
     }
-    
+
+    // Final mime after potential extension change
+    const finalMime = mime || mimeTypes.lookup(outputExt) || null;
+    const { size: finalSize } = await fs.stat(finalPath);
+
+    // Persist upload record (FIXED FIELDS)
+    const fileUpload = await FileUpload.create({
+      name: filename,
+      folders: folder,
+      size: finalSize, // bytes
+      file_type: outputExt, // helpful for querying
+      mime_type: finalMime,
+      uploader_type: admin_id ? "admin" : "employee",
+      employee_id,
+      admin_id,
+      entity_type,
+      entity_id, // <-- not clobbering entity_type
+      uploader_ip,
+      user_agent,
+    });
+
     return {
       filename,
       folder,
+      id: fileUpload.id,
     };
   } catch (err) {
     // Cleanup on error
@@ -356,7 +371,7 @@ async function deleteFile(fileName, folder, id = null) {
     if (!fileName || !folder) return false;
 
     // Full absolute path to file
-    const filePath = path.join(PUBLIC_DIR, folder, fileName);
+    const filePath = path.resolve(__dirname, "..", "public", folder, fileName);
 
     // Check existence
     const exists = await fs.pathExists(filePath);
@@ -394,7 +409,7 @@ async function deleteFolderRecursive(folderRelative) {
     if (!folderRelative || typeof folderRelative !== "string") return false;
 
     // Normalize and construct absolute path under /public
-    const publicRoot = PUBLIC_DIR;
+    const publicRoot = path.resolve(__dirname, "..", "public");
     const targetPath = path.resolve(publicRoot, folderRelative);
 
     // Safety: ensure targetPath stays within /public (prevent ../ traversal)
@@ -422,7 +437,7 @@ async function deleteFolderRecursive(folderRelative) {
   }
 }
 
-// Verifies magic-bytes and enforces that the file lives under /tmp at ROOT
+// Verifies magic-bytes and enforces that the file lives under ../tmp
 // - Deletes the temp file on ANY failure
 // - allowedMimeTypes must be provided by the caller
 async function verifyFileType(
@@ -447,8 +462,8 @@ async function verifyFileType(
       return false;
     }
 
-    // temp base = ROOT/tmp
-    const tempBase = TMP_DIR;
+    // Correct temp path relative to utils/fileUpload.js
+    const tempBase = path.resolve(__dirname, "..", "tmp");
     const resolvedPath = path.resolve(file.path);
 
     // Ensure file is inside /tmp (defend against traversal/prefix tricks)
@@ -545,6 +560,78 @@ async function safeRemove(tempPath) {
   }
 }
 
+// Block SSRF: allow only Google image hosts (tight allowlist)
+function isAllowedAvatarUrl(url) {
+  try {
+    const u = new URL(url);
+    if (u.protocol !== "https:") return false;
+
+    const host = u.hostname.toLowerCase();
+    return (
+      host === "lh3.googleusercontent.com" ||
+      host.endsWith(".googleusercontent.com") ||
+      host === "googleusercontent.com"
+    );
+  } catch {
+    return false;
+  }
+}
+
+// Creates a "multer-like" file object your uploadImage helper can accept
+function bufferToMulterFile(buffer, mime) {
+  return {
+    fieldname: "avatar",
+    originalname: randomFileName("webp"),
+    encoding: "7bit",
+    mimetype: mime,
+    size: buffer.length,
+    buffer,
+  };
+}
+
+async function downloadAndUploadGoogleAvatar(avatarUrl, folder, uploadImage) {
+  if (!avatarUrl) return null;
+  if (!isAllowedAvatarUrl(avatarUrl)) return null;
+
+  // Download with strict controls
+  const resp = await axios.get(avatarUrl, {
+    responseType: "arraybuffer",
+    timeout: 8000,
+    maxContentLength: MAX_AVATAR_BYTES,
+    maxBodyLength: MAX_AVATAR_BYTES,
+    headers: {
+      "User-Agent": "Mozilla/5.0",
+      Accept: "image/*",
+    },
+    validateStatus: (s) => s >= 200 && s < 300,
+  });
+
+  const inputBuffer = Buffer.from(resp.data);
+  if (!inputBuffer.length || inputBuffer.length > MAX_AVATAR_BYTES) return null;
+
+  // Detect real file type (don’t trust headers)
+  const ft = await fileTypeFromBuffer(inputBuffer);
+  const detectedMime = ft?.mime;
+
+  // If file-type can't detect, reject (safer)
+  if (!detectedMime || !ALLOWED_MIME.has(detectedMime)) return null;
+
+  // Sanitize + normalize: re-encode to WEBP (strips metadata)
+  const outBuffer = await sharp(inputBuffer)
+    .rotate() // respects EXIF rotation then strips it
+    .resize(512, 512, { fit: "cover" })
+    .webp({ quality: 82 })
+    .toBuffer();
+
+  if (!outBuffer.length || outBuffer.length > MAX_AVATAR_BYTES) return null;
+
+  const file = bufferToMulterFile(outBuffer, "image/webp");
+
+  // Your helper: uploadImage(file, folder)
+  const uploadedUrl = await uploadImage(file, folder);
+  return uploadedUrl || null;
+}
+
 module.exports = {
   fileUploader,
   uploadFile,
@@ -553,4 +640,5 @@ module.exports = {
   verifyFileType,
   uploadImage,
   cleanupTempFiles,
+  downloadAndUploadGoogleAvatar,
 };
