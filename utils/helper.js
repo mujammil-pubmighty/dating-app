@@ -159,41 +159,6 @@ function maskEmail(email) {
   return `${name}@${"*".repeat(domain.length - 2)}${lastChar}`;
 }
 
-async function getOrCreateChatBetweenUsers(userIdA, userIdB, transaction) {
-  // Optional: normalize to avoid duplicate chats
-  const [p1, p2] =
-    Number(userIdA) < Number(userIdB)
-      ? [Number(userIdA), Number(userIdB)]
-      : [Number(userIdB), Number(userIdA)];
-
-  let chat = await Chat.findOne({
-    where: {
-      participant_1_id: p1,
-      participant_2_id: p2,
-    },
-    transaction,
-  });
-
-  if (!chat) {
-    chat = await Chat.create(
-      {
-        participant_1_id: p1,
-        participant_2_id: p2,
-        last_message_id: null,
-        last_message_time: null,
-        unread_count_p1: 0,
-        unread_count_p2: 0,
-        is_archived_p1: false,
-        is_archived_p2: false,
-        chat_status_p1: "active",
-        chat_status_p2: "active",
-      },
-      { transaction }
-    );
-  }
-
-  return chat;
-}
 
 function validateCallParticipants(chat, callerId, receiverId) {
   const p1 = chat.participant_1_id;
@@ -249,7 +214,6 @@ module.exports = {
   getLocation,
   getUserAgentData,
   getDobRangeFromAges,
-  getOrCreateChatBetweenUsers,
   validateCallParticipants,
   calculateCallCost,
   typingTime,

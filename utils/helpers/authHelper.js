@@ -159,13 +159,6 @@ async function generateUniqueUsername(base) {
 function generateRandomPassword(length = 10) {
   const chars =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@#$!&";
-<<<<<<< HEAD
-  let pass = "";
-  for (let i = 0; i < length; i++) {
-    pass += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return pass;
-=======
 
   const randomValues = new Uint32Array(length);
   window.crypto.getRandomValues(randomValues);
@@ -192,7 +185,6 @@ function isValidPhone(phone) {
 function generateOtp() {
   const otp = crypto.randomInt(100000, 1000000); // Generates a number between 100000 and 999999
   return otp.toString(); // Return the OTP as a string
->>>>>>> 41da8d7b0d08c1a11965b9e06f9990888ad9df9b
 }
 
 function isValidEmail(email) {
