@@ -1,11 +1,20 @@
 // helpers/userAuthHelper.js
-const { Op } = require('sequelize');
-const crypto = require('crypto');
+const { Op } = require("sequelize");
+const crypto = require("crypto");
 
-const UserSession = require('../../models/UserSession');
-const { getOption, getRealIp, getUserAgentData, getLocation } = require('../helper');
+const UserSession = require("../../models/UserSession");
+const {
+  getOption,
+  getRealIp,
+  getUserAgentData,
+  getLocation,
+} = require("../helper");
 
+<<<<<<< HEAD
+// 1) Create user session
+=======
 // Create user session
+>>>>>>> 41da8d7b0d08c1a11965b9e06f9990888ad9df9b
 async function handleUserSessionCreation(req, user, transaction = null) {
   const ip = getRealIp(req);
   const locationData = await getLocation(ip);
@@ -134,6 +143,12 @@ async function isUserSessionValid(req) {
   }
 }
 
+<<<<<<< HEAD
+function generateRandomUsername() {
+  const prefix = "user";
+  const randomNum = Math.floor(100000 + Math.random() * 900000); // 6-digit random number
+  return `${prefix}${randomNum}`;
+=======
 // Generate a random username
 async function generateUniqueUsername(base) {
   const cleaned = (base || "user").toLowerCase().replace(/[^a-z0-9_.]/g, "");
@@ -149,11 +164,19 @@ async function generateUniqueUsername(base) {
     i += 1;
     candidate = (cleaned || "user").slice(0, 24) + i;
   }
+>>>>>>> 41da8d7b0d08c1a11965b9e06f9990888ad9df9b
 }
 
 function generateRandomPassword(length = 10) {
   const chars =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@#$!&";
+<<<<<<< HEAD
+  let pass = "";
+  for (let i = 0; i < length; i++) {
+    pass += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return pass;
+=======
 
   const randomValues = new Uint32Array(length);
   window.crypto.getRandomValues(randomValues);
@@ -180,14 +203,20 @@ function isValidPhone(phone) {
 function generateOtp() {
   const otp = crypto.randomInt(100000, 1000000); // Generates a number between 100000 and 999999
   return otp.toString(); // Return the OTP as a string
+>>>>>>> 41da8d7b0d08c1a11965b9e06f9990888ad9df9b
 }
 
 module.exports = {
   handleUserSessionCreation,
   isUserSessionValid,
+<<<<<<< HEAD
+  generateRandomUsername,
+  generateRandomPassword,
+=======
   generateUniqueUsername,
   generateRandomPassword,
   isValidEmail,
   isValidPhone,
   generateOtp,
+>>>>>>> 41da8d7b0d08c1a11965b9e06f9990888ad9df9b
 };

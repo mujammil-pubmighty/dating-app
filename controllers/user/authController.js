@@ -362,7 +362,6 @@ async function registerUser(req, res) {
     }
 
     // PHONE SIGNUP FLOW
-
     // Phone signup: direct create (no email involved)
     const user = await User.create({
       username,

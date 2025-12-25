@@ -44,6 +44,12 @@ const User = sequelize.define(
       defaultValue: "real",
     },
 
+    full_name: {
+      type: DataTypes.STRING(300),
+      allowNull: false,
+      unique: true,
+    },
+
     gender: {
       type: DataTypes.ENUM("male", "female", "other", "prefer_not_to_say"),
       allowNull: true,
@@ -62,7 +68,7 @@ const User = sequelize.define(
     },
 
     address: {
-      type: DataTypes.TEXT,
+      type: DataTypes.STRING(500),
     },
 
     avatar: {
@@ -104,17 +110,6 @@ const User = sequelize.define(
       type: DataTypes.INTEGER,
       allowNull: true,
     },
-    // looking_for: {
-    //   type: DataTypes.ENUM(
-    //     "Long-term relationship",
-    //     "Long-term, open to short",
-    //     "Short-term, open to long",
-    //     "Short-term fun",
-    //     "New friends",
-    //     "Still figuring it out"
-    //   ),
-    //   allowNull: true,
-    // },
     total_matches: {
       type: DataTypes.INTEGER,
       defaultValue: 0,
@@ -155,11 +150,17 @@ const User = sequelize.define(
     last_active: {
       type: DataTypes.DATE,
     },
+<<<<<<< HEAD
+    google_id: {
+      type: DataTypes.STRING(300),
+    },
+=======
 
     google_id: {
       type: DataTypes.STRING(300),
     },
 
+>>>>>>> 41da8d7b0d08c1a11965b9e06f9990888ad9df9b
     status: {
       type: DataTypes.TINYINT.UNSIGNED,
       allowNull: false,
