@@ -2,11 +2,6 @@ const express = require("express");
 const router = express.Router();
 const coinController = require("../../controllers/user/coinController");
 const authController = require("../../controllers/user/authController");
-<<<<<<< HEAD
-const utilController = require("../../config/utilController");
-=======
-const utilController = require("../../controllers/user/utilController");
->>>>>>> 41da8d7b0d08c1a11965b9e06f9990888ad9df9b
 const matchingController = require("../../controllers/user/matchingController");
 const userController = require("../../controllers/user/userController");
 const chatController = require("../../controllers/user/chatController");
@@ -14,13 +9,11 @@ const adsController = require("../../controllers/user/adViewController");
 const { fileUploader } = require("../../utils/helpers/fileUpload");
 const videoCallConroller = require("../../controllers/user/videoCallConroller");
 const mediaController = require("../../controllers/user/userMediaController");
-<<<<<<< HEAD
-=======
 const {
   verifyGooglePlayPurchase,
 } = require("../../controllers/user/googleBillingController");
+const utilController = require("../../controllers/user/utilController");
 
->>>>>>> 41da8d7b0d08c1a11965b9e06f9990888ad9df9b
 
 /**
  * GET /setting
@@ -111,10 +104,6 @@ router.post("/forgot-password", authController.forgotPassword);
 */
 router.post("/forgot-password/verify", authController.forgotPasswordVerify);
 
-<<<<<<< HEAD
-
-=======
->>>>>>> 41da8d7b0d08c1a11965b9e06f9990888ad9df9b
 //chatting between user1 & user2
 router.post(
   "/chats/:chatId/messages",
@@ -182,10 +171,7 @@ router.post(
 router.get("/media", mediaController.getMyMedia);
 router.post("/media/:id", mediaController.deleteMyMedia);
 
-<<<<<<< HEAD
-=======
 //google billing
 router.post("/billing/google-play/verify", verifyGooglePlayPurchase);
 
->>>>>>> 41da8d7b0d08c1a11965b9e06f9990888ad9df9b
 module.exports = router;
