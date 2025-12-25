@@ -1,30 +1,34 @@
 const Option = require("../models/Option");
 const { Op } = require("sequelize");
+const helper = require("../utils/helper");
 
-async function getAllOptions(req, res) {
+async function getSiteSettings(req, res) {
   try {
     const ids = [1, 5, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21];
 
-    const rows = await Option.findAll({
-      where: { id: { [Op.in]: ids } },
-      attributes: ["id", "name", "value"],
-    });
+    const options = await helper.getOptionsByIds(ids);
 
-    const config = {};
-
-    for (const row of rows) {
-      config[row.name] = row.value;
-    }
+    // Convert array of objects to key-value pair
+    const config = Array.isArray(options)
+      ? options.reduce((acc, { name, value }) => {
+          if (name && value !== undefined) {
+            acc[name] = value;
+          }
+          return acc;
+        }, {})
+      : {};
 
     return res.json({
       success: true,
       message: "Setting fetched successfully",
       data: config,
     });
-  } catch (err) {
-    console.log("error");
-    return err;
+  } catch (error) {
+    console.error("Error during getSiteSettings:", error);
+    return res
+      .status(500)
+      .json({ success: false, msg: "Internal server error" });
   }
 }
 
-module.exports = { getAllOptions };
+module.exports = { getSiteSettings };

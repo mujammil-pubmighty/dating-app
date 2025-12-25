@@ -13,12 +13,14 @@ async function run() {
     await sequelize.authenticate();
 
     // Two-factor toggle
-    await set("verify_gmail_register", true);
+    await set("verify_register_email", true);
     await set("register_otp_time_min", 10);
+    await set("forgot_otp_time_min", 10);
     await set("default_per_page_packages", 10);
     await set("default_total_page_packages", 10);
     await set("cost_per_message", 10);
     await set("max_pinned_chats", 10);
+    await set("google_client_id", "12345678");
 
     console.log("Options inserted/verified");
     process.exit(0);

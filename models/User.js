@@ -1,5 +1,5 @@
 const { DataTypes } = require("sequelize");
-const sequelize = require("../config/db"); 
+const sequelize = require("../config/db");
 
 const User = sequelize.define(
   "User",
@@ -44,6 +44,12 @@ const User = sequelize.define(
       defaultValue: "real",
     },
 
+    full_name: {
+      type: DataTypes.STRING(300),
+      allowNull: false,
+      unique: true,
+    },
+
     gender: {
       type: DataTypes.ENUM("male", "female", "other", "prefer_not_to_say"),
       allowNull: true,
@@ -62,7 +68,7 @@ const User = sequelize.define(
     },
 
     address: {
-      type: DataTypes.TEXT,
+      type: DataTypes.STRING(500),
     },
 
     avatar: {
@@ -76,7 +82,7 @@ const User = sequelize.define(
     bio: {
       type: DataTypes.TEXT,
     },
-     interests: {
+    interests: {
       type: DataTypes.TEXT,
       allowNull: true,
     },
@@ -104,17 +110,6 @@ const User = sequelize.define(
       type: DataTypes.INTEGER,
       allowNull: true,
     },
-    // looking_for: {
-    //   type: DataTypes.ENUM(
-    //     "Long-term relationship",
-    //     "Long-term, open to short",
-    //     "Short-term, open to long",
-    //     "Short-term fun",
-    //     "New friends",
-    //     "Still figuring it out"
-    //   ),
-    //   allowNull: true,
-    // },
     total_matches: {
       type: DataTypes.INTEGER,
       defaultValue: 0,
@@ -155,21 +150,23 @@ const User = sequelize.define(
     last_active: {
       type: DataTypes.DATE,
     },
-
-    created_at: {
-      type: DataTypes.DATE,
-      defaultValue: DataTypes.NOW,
+    google_id: {
+      type: DataTypes.STRING(300),
     },
-
-    updated_at: {
-      type: DataTypes.DATE,
-      defaultValue: DataTypes.NOW,
+    status: {
+      type: DataTypes.TINYINT.UNSIGNED,
+      allowNull: false,
+      defaultValue: 1,
+      validate: {
+        isIn: [[0, 1, 2, 3]],
+      },
+      comment: "0=pending, 1=active, 2=suspended, 3=disabled",
     },
   },
 
   {
     tableName: "pb_users",
-    timestamps: false,
+    timestamps: true,
     underscored: true,
     indexes: [
       { fields: ["email"] },

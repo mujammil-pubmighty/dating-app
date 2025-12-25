@@ -1,23 +1,28 @@
 // helpers/userAuthHelper.js
-const { Op } = require('sequelize');
-const crypto = require('crypto');
+const { Op } = require("sequelize");
+const crypto = require("crypto");
 
-const UserSession = require('../../models/UserSession');
-const { getOption, getRealIp, getUserAgentData, getLocation } = require('../helper');
+const UserSession = require("../../models/UserSession");
+const {
+  getOption,
+  getRealIp,
+  getUserAgentData,
+  getLocation,
+} = require("../helper");
 
 // 1) Create user session
-async function handleUserSessionCreate(user, req, transaction = null) {
+async function handleUserSessionCreation(req, user, transaction = null) {
   const ip = getRealIp(req);
   const locationData = await getLocation(ip);
   const userAgentData = await getUserAgentData(req);
 
   const maxSessionDays = parseInt(
-    await getOption('max_user_session_duration_days', 7),
+    await getOption("max_user_session_duration_days", 7),
     10
   );
   const maxSessionSeconds = maxSessionDays * 24 * 3600;
 
-  const token = crypto.randomBytes(32).toString('base64url');
+  const token = crypto.randomBytes(32).toString("base64url");
   const now = new Date();
   const expiresAt = new Date(now.getTime() + maxSessionSeconds * 1000);
 
@@ -40,10 +45,7 @@ async function handleUserSessionCreate(user, req, transaction = null) {
     transaction,
   });
 
-  const maxUserSessions = parseInt(
-    await getOption('max_user_sessions', 4),
-    10
-  );
+  const maxUserSessions = parseInt(await getOption("max_user_sessions", 4), 10);
 
   const sessionPayload = {
     userId: user.id,
@@ -65,7 +67,7 @@ async function handleUserSessionCreate(user, req, transaction = null) {
   // reuse oldest session if above limit
   const oldestActive = await UserSession.findOne({
     where: { userId: user.id },
-    order: [['expiresAt', 'ASC']],
+    order: [["expiresAt", "ASC"]],
     transaction,
   });
 
@@ -81,35 +83,33 @@ async function handleUserSessionCreate(user, req, transaction = null) {
 // 2) Validate user session
 async function isUserSessionValid(req) {
   try {
-    const authHeader = req.headers['authorization'];
-    if (!authHeader?.startsWith('Bearer ')) {
+    const authHeader = req.headers["authorization"];
+    if (!authHeader?.startsWith("Bearer ")) {
       return {
         success: false,
-        message: 'Missing or invalid Authorization header',
+        message: "Missing or invalid Authorization header",
         data: null,
       };
     }
 
-    const token = authHeader.split(' ')[1];
+    const token = authHeader.split(" ")[1];
 
     const session = await UserSession.findOne({
       where: { sessionToken: token, status: 1 },
     });
 
     if (!session) {
-      return { success: false, message: 'Invalid session', data: null };
+      return { success: false, message: "Invalid session", data: null };
     }
 
     const now = new Date();
     if (session.expiresAt && session.expiresAt < now) {
       await session.update({ status: 2 });
-      return { success: false, message: 'Session expired', data: null };
+      return { success: false, message: "Session expired", data: null };
     }
 
     const SLIDING_IDLE_MS =
-      parseInt(await getOption('user_min_update_interval', 30), 10) *
-      60 *
-      1000;
+      parseInt(await getOption("user_min_update_interval", 30), 10) * 60 * 1000;
 
     if (SLIDING_IDLE_MS > 0) {
       const lastActivityAt = session.lastActivityAt;
@@ -126,20 +126,38 @@ async function isUserSessionValid(req) {
 
     return {
       success: true,
-      message: 'Session is valid',
+      message: "Session is valid",
       data: session.userId,
     };
   } catch (err) {
-    console.error('Auth error (user):', err);
+    console.error("Auth error (user):", err);
     return {
       success: false,
-      message: 'Server error during auth',
+      message: "Server error during auth",
       data: null,
     };
   }
 }
 
+function generateRandomUsername() {
+  const prefix = "user";
+  const randomNum = Math.floor(100000 + Math.random() * 900000); // 6-digit random number
+  return `${prefix}${randomNum}`;
+}
+
+function generateRandomPassword(length = 10) {
+  const chars =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@#$!&";
+  let pass = "";
+  for (let i = 0; i < length; i++) {
+    pass += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return pass;
+}
+
 module.exports = {
-  handleUserSessionCreate,
+  handleUserSessionCreation,
   isUserSessionValid,
+  generateRandomUsername,
+  generateRandomPassword,
 };

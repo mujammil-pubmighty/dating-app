@@ -15,126 +15,6 @@ const UAParser = require("ua-parser-js");
 let lookup;
 const dbPath = path.join(__dirname, "/ip-db/GeoLite2-City.mmdb");
 
-async function handleSessionCreate(req, user_id, transaction = null) {
-  const ip = getRealIp(req);
-  const locationData = await getLocation(ip);
-  const userAgentData = await getUserAgentData(req);
-  const maxUserSessionDurationDays = parseInt(
-    await getOption("max_user_session_duration_days", 7)
-  );
-  const maxUserSessionDurationSeconds = maxUserSessionDurationDays * 24 * 3600;
-
-  const token = crypto.randomBytes(32).toString("base64url");
-  const now = new Date();
-  const expires_at = new Date(
-    now.getTime() + maxUserSessionDurationSeconds * 1000
-  );
-
-  // Mark already-expired active sessions as inactive (status: 2=inactive 1=active)
-  await UserSession.update(
-    { status: 2 },
-    {
-      where: {
-        user_id,
-        status: 1,
-        expires_at: { [Op.lt]: now },
-      },
-      transaction,
-    }
-  );
-
-  // Count current ACTIVE sessions
-  const activeCount = await UserSession.count({
-    where: { user_id, status: 1 },
-    transaction,
-  });
-
-  const maxUserSessions = parseInt(await getOption("max_user_sessions", 4));
-
-  if (activeCount < maxUserSessions) {
-    // CREATE new active session
-    await UserSession.create(
-      {
-        user_id,
-        session_token: token,
-        ip: ip,
-        userAgent: userAgentData.userAgent,
-        country: locationData.countryCode,
-        os: userAgentData.os,
-        browser: userAgentData.browser,
-        status: 1, // active
-        expires_at: expires_at,
-      },
-      { transaction }
-    );
-    return { token, expires_at };
-  }
-
-  // Get the oldest active session
-  const oldestActive = await UserSession.findOne({
-    where: { user_id },
-    order: [["expires_at", "ASC"]],
-    transaction,
-  });
-
-  if (!oldestActive) {
-    // fallback: create if none found
-    await UserSession.create(
-      {
-        user_id,
-        session_token: token,
-        ip: ip,
-        user_agent: userAgentData.userAgent,
-        country: locationData.countryCode,
-        os: userAgentData.os,
-        browser: userAgentData.browser,
-        status: 1, // active
-        expires_at: expires_at,
-      },
-      { transaction }
-    );
-    return { token, expires_at };
-  }
-
-  await oldestActive.update(
-    {
-      user_id,
-      session_token: token,
-      ip: ip,
-      user_agent: userAgentData.userAgent,
-      country: locationData.countryCode,
-      os: userAgentData.os,
-      browser: userAgentData.browser,
-      status: 1, // active
-      expires_at: expires_at,
-    },
-    { transaction }
-  );
-
-  return { token, expires_at };
-}
-
-async function sendOtpMail(user, otpObj, title, action) {
-  // Destructure otp and expiry from otpObj
-  const { otp, expiry } = otpObj;
-
-  // Ensure that OTP and expiry are correctly destructured
-  if (!otp || !expiry) {
-    console.error("Invalid OTP object:", otpObj); // Log invalid OTP object
-    throw new Error("OTP object is missing required properties");
-  }
-
-  const htmlContent = returnMailTemplate(user, otpObj, action);
-
-  return transporter.sendMail({
-    from: `Mighty Games <no-reply@gplinks.org>`,
-    // from: `"Mighty Games" <no-reply@mightygames.com>`,
-    to: user.email,
-    subject: title,
-    text: `Your OTP is: ${otp} (valid for 5 minutes)`,
-    html: htmlContent,
-  });
-}
 
 function generateOtp() {
   // Generate a random 6-digit OTP
@@ -158,6 +38,11 @@ async function generateUniqueUsername(base) {
   }
 }
 
+/**
+ * Fetches a single option by name.
+ * @param {string} optionName - Name of the option.
+ * @returns {Promise<string>} - Returns the option value.
+ */
 async function getOption(optionName, dValue = null) {
   try {
     const option = await Option.findOne({ where: { name: optionName } });
@@ -180,6 +65,18 @@ async function getOption(optionName, dValue = null) {
     return dValue;
   }
 }
+
+/**
+ * Fetches multiple options by their IDs.
+ * @param {Array<number>} ids - List of option IDs to fetch.
+ * @returns {Promise<Array>} - Returns the options as an array.
+ */
+const getOptionsByIds = async (ids) => {
+  return await Option.findAll({
+    where: { id: { [Op.in]: ids } },
+    attributes: ["id", "name", "value"],
+  });
+};
 
 function getRealIp(req) {
   // Check for Cloudflare's header first
@@ -246,21 +143,7 @@ function getUserAgentData(req) {
     userAgent: ua,
   };
 }
-function generateRandomUsername() {
-  const prefix = "user";
-  const randomNum = Math.floor(100000 + Math.random() * 900000); // 6-digit random number
-  return `${prefix}${randomNum}`;
-}
 
-function generateRandomPassword(length = 10) {
-  const chars =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@#$!&";
-  let pass = "";
-  for (let i = 0; i < length; i++) {
-    pass += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return pass;
-}
 
 function isValidEmail(email) {
   const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
@@ -271,27 +154,6 @@ function isValidPhone(phone) {
   return phoneRegex.test(phone);
 }
 
-async function sendOtpMail(user, otpObj, title, action) {
-  // Destructure otp and expiry from otpObj
-  const { otp, expiry } = otpObj;
-
-  // Ensure that OTP and expiry are correctly destructured
-  if (!otp || !expiry) {
-    console.error("Invalid OTP object:", otpObj); // Log invalid OTP object
-    throw new Error("OTP object is missing required properties");
-  }
-
-  const htmlContent = returnMailTemplate(user, otpObj, action);
-
-  return transporter.sendMail({
-    from: `Mighty Games <no-reply@gplinks.org>`,
-    // from: `"Mighty Games" <no-reply@mightygames.com>`,
-    to: user.email,
-    subject: title,
-    text: `Your OTP is: ${otp} (valid for 5 minutes)`,
-    html: htmlContent,
-  });
-}
 async function isUserSessionValid(req) {
   try {
     const authHeader = req.headers["authorization"];
@@ -395,7 +257,7 @@ async function getOrCreateChatBetweenUsers(userIdA, userIdB, transaction) {
 
   let chat = await Chat.findOne({
     where: {
-      participant_1_id: p1, 
+      participant_1_id: p1,
       participant_2_id: p2,
     },
     transaction,
@@ -464,23 +326,25 @@ function typingTime(sentence, wpm = 40) {
   };
 }
 
+function randomFileName(ext = "webp") {
+  return `DA-${crypto.randomBytes(16).toString("hex")}.${ext}`;
+}
+
 module.exports = {
   getRealIp,
   getOption,
+  getOptionsByIds,
   generateUniqueUsername,
   generateOtp,
-  handleSessionCreate,
   getLocation,
   getUserAgentData,
-  generateRandomUsername,
-  generateRandomPassword,
   isValidEmail,
   isValidPhone,
-  sendOtpMail,
   isUserSessionValid,
   getDobRangeFromAges,
   getOrCreateChatBetweenUsers,
   validateCallParticipants,
   calculateCallCost,
   typingTime,
+  randomFileName,
 };
