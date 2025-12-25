@@ -159,7 +159,8 @@ async function uploadFile(
   uploader_ip = null,
   user_agent = null,
   admin_id = null,
-  employee_id = null
+  employee_id = null,
+  recordType = "chat"
 ) {
   if (!file || !file.path) throw new Error("Missing file");
 
@@ -327,21 +328,24 @@ async function uploadFile(
     const finalMime = mime || mimeTypes.lookup(outputExt) || null;
     const { size: finalSize } = await fs.stat(finalPath);
 
-    // Persist upload record (FIXED FIELDS)
-    const fileUpload = await FileUpload.create({
-      name: filename,
-      folders: folder,
-      size: finalSize, // bytes
-      file_type: outputExt, // helpful for querying
-      mime_type: finalMime,
-      uploader_type: admin_id ? "admin" : "employee",
-      employee_id,
-      admin_id,
-      entity_type,
-      entity_id, // <-- not clobbering entity_type
-      uploader_ip,
-      user_agent,
-    });
+    if (recordType === "chat") {
+    } else {
+      // Persist upload record (FIXED FIELDS)
+      const fileUpload = await FileUpload.create({
+        name: filename,
+        folders: folder,
+        size: finalSize, // bytes
+        file_type: outputExt, // helpful for querying
+        mime_type: finalMime,
+        uploader_type: admin_id ? "admin" : "employee",
+        employee_id,
+        admin_id,
+        entity_type,
+        entity_id, // <-- not clobbering entity_type
+        uploader_ip,
+        user_agent,
+      });
+    }
 
     return {
       filename,
