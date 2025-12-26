@@ -6,7 +6,8 @@ const {
   getOption,
   getDobRangeFromAges,
   maskEmail,
-  maskPhone
+  maskPhone,
+  getRealIp,
 } = require("../../utils/helper");
 const {
   fileUploader,
@@ -19,63 +20,87 @@ const { Op } = require("sequelize");
 const { compressImage } = require("../../utils/helpers/imageCompressor");
 const { logActivity } = require("../../utils/helpers/activityLogHelper");
 const { isUserSessionValid } = require("../../utils/helpers/authHelper");
+const { publicUserAttributes } = require("../../utils/staticValues");
+const FileUpload = require("../../models/FileUpload");
+const UserSession = require("../../models/UserSession");
+
+async function getUserProfile(req, res) {
+  try {
+    // Validate session first
+    const sessionResult = await isUserSessionValid(req);
+    if (!sessionResult.success) {
+      return res.status(401).json(sessionResult);
+    }
+    const userId = Number(sessionResult.data);
+
+    const user = await User.findByPk(userId, {
+      attributes: publicUserAttributes,
+    });
+
+    if (!user) {
+      return res.status(500).json({
+        success: false,
+        message: "User not found.",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Profile fetched successfully.",
+      data: user,
+    });
+  } catch (err) {
+    console.error("Error during getUserProfile:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong while fetching profile.",
+    });
+  }
+}
 
 async function updateUserProfile(req, res) {
-  const transaction = await sequelize.transaction();
-
-  const normalizeInterests = (raw) => {
-    if (!raw) return null;
-
-    let arr = [];
-
-    if (Array.isArray(raw)) {
-      arr = raw;
-    } else if (typeof raw === "string") {
-      arr = raw.split(",");
-    } else {
-      return null;
-    }
-
-    let interests = arr.map((v) => String(v).trim()).filter(Boolean);
-
-    interests = [...new Set(interests)];
-
-    interests = interests.slice(0, 6);
-
-    if (!interests.length) return null;
-
-    return interests.join(",");
-  };
-
-  const parseInterests = (stored) => {
-    if (!stored) return [];
-    return stored
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-  };
+  // Validate session first
+  const sessionResult = await isUserSessionValid(req);
+  if (!sessionResult.success) {
+    return res.status(401).json(sessionResult);
+  }
+  const userId = Number(sessionResult.data);
 
   try {
+    // If file exists, process it BEFORE validation
+    let uploadedAvatar = null;
     if (req.file) {
-      const result = await compressImage(req.file.path, "avatar");
-      req.body.avatar = result.filename;
+      const isFileGood = await verifyFileType(req.file, [
+        "image/png",
+        "image/jpeg",
+        "image/jpg",
+        "image/webp",
+        "image/heic",
+        "image/heif",
+      ]);
+
+      if (!isFileGood) {
+        return res
+          .status(400)
+          .json({ success: false, msg: "Invalid file type" });
+      }
+
+      const result = await uploadImage(req.file, "uploads/avatar/user");
+      uploadedAvatar = result || null;
     }
 
+    // Schema
     const updateProfileSchema = Joi.object({
-      username: Joi.string().min(3).max(50).optional(),
-      email: Joi.string().email().max(100).optional().allow(null, ""),
-      phone: Joi.string().max(100).optional().allow(null, ""),
       gender: Joi.string()
         .valid("male", "female", "other", "prefer_not_to_say")
         .optional()
         .allow(null),
-      city: Joi.string().max(100).optional().allow(null, ""),
-      state: Joi.string().max(100).optional().allow(null, ""),
-      country: Joi.string().max(100).optional().allow(null, ""),
-      address: Joi.string().optional().allow(null, ""),
-      avatar: Joi.string().max(255).optional().allow(null, ""),
+      city: Joi.string().trim().max(100).optional().allow(null, ""),
+      state: Joi.string().trim().max(100).optional().allow(null, ""),
+      country: Joi.string().trim().max(100).optional().allow(null, ""),
+      address: Joi.string().trim().optional().allow(null, ""),
       dob: Joi.date().iso().optional().allow(null, ""),
-      bio: Joi.string().optional().allow(null, ""),
+      bio: Joi.string().trim().optional().allow(null, ""),
 
       looking_for: Joi.string()
         .valid(
@@ -89,746 +114,271 @@ async function updateUserProfile(req, res) {
         .optional()
         .allow(null, ""),
 
-      height: Joi.string().max(250).optional().allow(null),
-      education: Joi.string().max(200).optional().allow(null, ""),
-      interests: Joi.array().items(Joi.string().max(50)).max(6).optional(),
+      height: Joi.string().trim().max(250).optional().allow(null, ""),
+      education: Joi.string().trim().max(200).optional().allow(null, ""),
+      interests: Joi.alternatives()
+        .try(
+          Joi.array().items(Joi.string().trim().max(50)).max(6),
+          Joi.string().trim().max(400) // allow "a,b,c" too
+        )
+        .optional(),
     }).min(1);
 
-    const { error, value } = updateProfileSchema.validate(req.body, {
+    // Merge avatar from upload (server-trusted) over body (client-controlled)
+    const payload = {
+      ...req.body,
+      ...(uploadedAvatar ? { avatar: uploadedAvatar } : {}),
+    };
+
+    const { error, value } = updateProfileSchema.validate(payload, {
       abortEarly: true,
       stripUnknown: true,
+      convert: true,
     });
-  const changedFields = Object.keys(value || {});
+
     if (error) {
-      await transaction.rollback();
       return res.status(400).json({
         success: false,
-        message: error.details[0].message,
+        message: error.details?.[0]?.message || "Invalid request.",
+        data: null,
       });
     }
 
+    // Normalize interests
     if (Object.prototype.hasOwnProperty.call(value, "interests")) {
       value.interests = normalizeInterests(value.interests);
     }
 
-    //  Check session
-    const sessionResult = await isUserSessionValid(req);
-    if (!sessionResult.success) {
-      await transaction.rollback();
-      return res.status(401).json(sessionResult);
-    }
+    const changedFields = Object.keys(value);
 
-    const userId = Number(sessionResult.data);
-
-    //  Load current user
-    const user = await User.findByPk(userId, { transaction });
-
-    if (!user) {
-      await transaction.rollback();
-      return res.status(404).json({
-        success: false,
-        message: "User not found.",
-      });
-    }
-
-    //  Unique checks
-    if (value.username && value.username !== user.username) {
-      const existingUsername = await User.findOne({
-        where: { username: value.username },
-        transaction,
-      });
-
-      if (existingUsername) {
-        await transaction.rollback();
-        return res.status(409).json({
-          success: false,
-          message: "Username is already taken.",
-        });
+    // Transaction in callback style = auto commit/rollback (safer)
+    const updatedUser = await sequelize.transaction(async (transaction) => {
+      // Load user with transaction
+      const user = await User.findByPk(userId, { transaction });
+      if (!user) {
+        const err = new Error("User not found.");
+        err.statusCode = 404;
+        throw err;
       }
-    }
 
-    if (
-      typeof value.email !== "undefined" &&
-      value.email &&
-      value.email !== user.email
-    ) {
-      const existingEmail = await User.findOne({
-        where: { email: value.email },
-        transaction,
-      });
+      // Whitelist updates (never trust incoming keys)
+      const updatableFields = [
+        "gender",
+        "city",
+        "state",
+        "country",
+        "address",
+        "avatar",
+        "dob",
+        "bio",
+        "looking_for",
+        "height",
+        "education",
+        "interests",
+      ];
 
-      if (existingEmail) {
-        await transaction.rollback();
-        return res.status(409).json({
-          success: false,
-          message: "Email is already taken.",
-        });
+      const updates = {};
+      for (const key of updatableFields) {
+        if (Object.prototype.hasOwnProperty.call(value, key)) {
+          const v = value[key];
+          // Treat empty string as null to allow “clear field”
+          updates[key] = v === "" ? null : v;
+        }
       }
-    }
 
-    const updatableFields = [
-      "username",
-      "email",
-      "phone",
-      "gender",
-      "city",
-      "state",
-      "country",
-      "address",
-      "avatar",
-      "dob",
-      "bio",
-      "looking_for",
-      "height",
-      "education",
-      "interests",
-    ];
-
-    const updates = {};
-
-    for (const key of updatableFields) {
-      if (Object.prototype.hasOwnProperty.call(value, key)) {
-        updates[key] = value[key] === "" ? null : value[key];
+      // If nothing survives whitelist -> reject
+      if (!Object.keys(updates).length) {
+        const err = new Error("No valid fields to update.");
+        err.statusCode = 400;
+        throw err;
       }
-    }
 
-    updates.updated_at = new Date();
+      // Update
+      await user.update(updates, { transaction });
 
-    await user.update(updates, { transaction });
+      // Return fresh instance (includes updated fields)
+      return user;
+    });
 
-    await transaction.commit();
-
-    const safeUser = {
-      id: user.id,
-      username: user.username,
-      email: user.email,
-      phone: user.phone,
-      gender: user.gender,
-      city: user.city,
-      state: user.state,
-      country: user.country,
-      address: user.address,
-      avatar: user.avatar,
-      dob: user.dob,
-      bio: user.bio,
-      looking_for: user.looking_for,
-      height: user.height,
-      education: user.education,
-      interests: parseInterests(user.interests),
-      coins: user.coins,
-      total_likes: user.total_likes,
-      total_matches: user.total_matches,
-      total_rejects: user.total_rejects,
-      is_active: user.is_active,
-      is_verified: user.is_verified,
-      last_active: user.last_active,
-      created_at: user.created_at,
-      updated_at: user.updated_at,
-    };
-   try {
+    // Activity log (don’t break success if logging fails)
+    try {
       await logActivity(req, {
-        userId: user.id,
+        userId: updatedUser.id,
         action: "profile update success",
         entityType: "user",
-        entityId: user.id,
-        metadata: {
-          changed_fields: changedFields,
-        },
+        entityId: updatedUser.id,
+        metadata: { changed_fields: changedFields },
       });
     } catch (e) {
       console.error("ActivityLog failed (ignored):", e?.message || e);
     }
-    return res.status(200).json({
-      success: true,
-      message: "Profile updated successfully.",
-      data: safeUser,
+
+    await updatedUser.reload({
+      attributes: publicUserAttributes,
     });
-  } catch (err) {
-    console.error("[updateUserProfile] Error:", err);
-    await transaction.rollback();
-    return res.status(500).json({
-      success: false,
-      message: "Something went wrong while updating profile.",
-    });
-  }
-}
-
-async function changePassword(req, res) {
-  const transaction = await sequelize.transaction();
-
-  try {
-    // 1) Validate body
-    const changePasswordSchema = Joi.object({
-      old_password: Joi.string().min(6).max(255).required(),
-      new_password: Joi.string().min(8).max(255).required(),
-      confirm_password: Joi.string().valid(Joi.ref("new_password")).required(),
-    });
-    const { error, value } = changePasswordSchema.validate(req.body, {
-      abortEarly: true,
-      stripUnknown: true,
-    });
-
-    if (error) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: error.details[0].message,
-      });
-    }
-
-    const { old_password, new_password } = value;
-
-    // 2) Validate session (user must be logged in)
-    const sessionResult = await isUserSessionValid(req);
-    if (!sessionResult.success) {
-      await transaction.rollback();
-      return res.status(401).json(sessionResult);
-    }
-
-    const userId = Number(sessionResult.data);
-    if (!userId || Number.isNaN(userId)) {
-      await transaction.rollback();
-      return res.status(401).json({
-        success: false,
-        message: "Invalid session.",
-      });
-    }
-
-    // 3) Load user
-    const user = await User.findByPk(userId, { transaction });
-
-    if (!user) {
-      await transaction.rollback();
-      return res.status(404).json({
-        success: false,
-        message: "User not found.",
-      });
-    }
-
-    // Optional: block password change for social login-only users
-    if (user.register_type !== "manual") {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message:
-          "Password cannot be changed for this account type. Please use your social login.",
-      });
-    }
-
-    // 4) Compare old password
-    const isMatch = await bcrypt.compare(old_password, user.password);
-    if (!isMatch) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "Old password is incorrect.",
-      });
-    }
-
-    // 5) Prevent using same password again
-    const isSame = await bcrypt.compare(new_password, user.password);
-    if (isSame) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "New password must be different from old password.",
-      });
-    }
-
-    // 6) Hash new password
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(new_password, salt);
-
-    // 7) Update password
-    await user.update(
-      {
-        password: hashedPassword,
-        updated_at: new Date(),
-      },
-      { transaction }
-    );
-
-    // 8) Invalidate all active sessions for this user (force re-login everywhere)
-    await UserSession.destroy({
-      where: { user_id: userId },
-      transaction,
-    });
-
-    await transaction.commit();
-
-    return res.status(200).json({
-      success: true,
-      message: "Password changed successfully. Please log in again.",
-    });
-  } catch (err) {
-    console.error("[changePassword] Error:", err);
-    await transaction.rollback();
-    return res.status(500).json({
-      success: false,
-      message: "Something went wrong while changing password.",
-    });
-  }
-}
-
-async function getUserProfile(req, res) {
-  const transaction = await sequelize.transaction();
-
-  const normalizeInterests = (raw) => {
-    if (!raw) return null;
-
-    let arr = [];
-
-    if (Array.isArray(raw)) {
-      arr = raw;
-    } else if (typeof raw === "string") {
-      arr = raw.split(",");
-    } else {
-      return null;
-    }
-
-    let interests = arr.map((v) => String(v).trim()).filter(Boolean);
-
-    interests = [...new Set(interests)];
-    interests = interests.slice(0, 6);
-
-    if (!interests.length) return null;
-
-    return interests.join(",");
-  };
-
-  const parseInterests = (stored) => {
-    if (!stored) return [];
-    return stored
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-  };
-
-  try {
-    if (req.file) {
-      const verifyResult = await verifyFileType(req.file, [
-        "image/png",
-        "image/jpeg",
-        "image/jpg",
-        "image/webp",
-        "image/heic",
-        "image/heif",
-      ]);
-
-      if (!verifyResult || !verifyResult.ok) {
-        await cleanupTempFiles([req.file]).catch(() => {});
-        await transaction.rollback();
-        return res.status(400).json({
-          success: false,
-          message: "Invalid avatar file type.",
-        });
-      }
-
-      const result = await compressImage(req.file.path, "avatar");
-
-      req.body.avatar = result.filename;
-    }
-
-    const updateProfileSchema = Joi.object({
-      username: Joi.string().min(3).max(50).optional(),
-      email: Joi.string().email().max(100).optional().allow(null, ""),
-      phone: Joi.string().max(100).optional().allow(null, ""),
-
-      gender: Joi.string()
-        .valid("male", "female", "other", "prefer_not_to_say")
-        .optional()
-        .allow(null),
-
-      city: Joi.string().max(100).optional().allow(null, ""),
-      state: Joi.string().max(100).optional().allow(null, ""),
-      country: Joi.string().max(100).optional().allow(null, ""),
-      address: Joi.string().optional().allow(null, ""),
-      avatar: Joi.string().max(255).optional().allow(null, ""),
-      dob: Joi.date().iso().optional().allow(null, ""),
-      bio: Joi.string().optional().allow(null, ""),
-      looking_for: Joi.string()
-        .valid(
-          "Long Term",
-          "Long Term Open To Short",
-          "Short Term Open To Long",
-          "Short Term Fun",
-          "New Friends",
-          "Still Figuring Out"
-        )
-        .optional()
-        .allow(null, ""),
-
-      height: Joi.string().max(250).optional().allow(null),
-      education: Joi.string().max(200).optional().allow(null, ""),
-      interests: Joi.array().items(Joi.string().max(50)).max(6).optional(),
-    });
-
-    const { error, value: validated } = updateProfileSchema.validate(
-      req.body || {},
-      {
-        abortEarly: true,
-        stripUnknown: true,
-      }
-    );
-
-    if (error) {
-      if (req.file) await cleanupTempFiles([req.file]).catch(() => {});
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: error.details[0].message,
-      });
-    }
-    const value = validated || {};
-
-    if (Object.prototype.hasOwnProperty.call(value, "interests")) {
-      value.interests = normalizeInterests(value.interests);
-    }
-    // Session check (same as ref)
-    const sessionResult = await isUserSessionValid(req);
-    if (!sessionResult.success) {
-      if (req.file) await cleanupTempFiles([req.file]).catch(() => {});
-      await transaction.rollback();
-      return res.status(401).json(sessionResult);
-    }
-
-    const userId = Number(sessionResult.data);
-
-    // Load user in transaction
-    const user = await User.findByPk(userId, { transaction });
-    if (!user) {
-      if (req.file) await cleanupTempFiles([req.file]).catch(() => {});
-      await transaction.rollback();
-      return res.status(404).json({
-        success: false,
-        message: "User not found.",
-      });
-    }
-
-    const oldAvatar = user.avatar;
-
-    // Unique checks
-    if (value.username && value.username !== user.username) {
-      const existingUsername = await User.findOne({
-        where: { username: value.username },
-        transaction,
-      });
-
-      if (existingUsername) {
-        if (req.file) await cleanupTempFiles([req.file]).catch(() => {});
-        await transaction.rollback();
-        return res.status(409).json({
-          success: false,
-          message: "Username is already taken.",
-        });
-      }
-    }
-
-    if (
-      typeof value.email !== "undefined" &&
-      value.email &&
-      value.email !== user.email
-    ) {
-      const existingEmail = await User.findOne({
-        where: { email: value.email },
-        transaction,
-      });
-
-      if (existingEmail) {
-        if (req.file) await cleanupTempFiles([req.file]).catch(() => {});
-        await transaction.rollback();
-        return res.status(409).json({
-          success: false,
-          message: "Email is already taken.",
-        });
-      }
-    }
-
-    const updatableFields = [
-      "username",
-      "email",
-      "phone",
-      "gender",
-      "city",
-      "state",
-      "country",
-      "address",
-      "avatar",
-      "dob",
-      "bio",
-      "looking_for",
-      "height",
-      "education",
-      "interests",
-    ];
-
-    const updates = {};
-    for (const key of updatableFields) {
-      if (Object.prototype.hasOwnProperty.call(value, key)) {
-        updates[key] = value[key] === "" ? null : value[key];
-      }
-    }
-
-    updates.updated_at = new Date();
-
-    await user.update(updates, { transaction });
-
-    await transaction.commit();
-
-    //  cleanup uploaded temp file
-    if (req.file) await cleanupTempFiles([req.file]).catch(() => {});
-
-    //  delete old avatar if changed
-    if (req.body?.avatar && oldAvatar && oldAvatar !== req.body.avatar) {
-      deleteFile(oldAvatar, "avatar").catch(() => {});
-    }
-
-    const safeUser = {
-      id: user.id,
-      username: user.username,
-      email: user.email,
-      phone: user.phone,
-      gender: user.gender,
-      city: user.city,
-      state: user.state,
-      country: user.country,
-      address: user.address,
-      avatar: user.avatar,
-      dob: user.dob,
-      bio: user.bio,
-      looking_for: user.looking_for,
-      height: user.height,
-      education: user.education,
-      interests: parseInterests(user.interests),
-      coins: user.coins,
-      total_likes: user.total_likes,
-      total_matches: user.total_matches,
-      total_rejects: user.total_rejects,
-      is_active: user.is_active,
-      is_verified: user.is_verified,
-      last_active: user.last_active,
-      created_at: user.created_at,
-      updated_at: user.updated_at,
-    };
 
     return res.status(200).json({
       success: true,
       message: "Profile updated successfully.",
-      data: safeUser,
+      data: updatedUser,
     });
   } catch (err) {
-    console.error("[getUserSettings/update profile] Error:", err);
-    if (req.file) await cleanupTempFiles([req.file]).catch(() => {});
-    await transaction.rollback().catch(() => {});
+    console.error("Error during updateUserProfile:", err);
     return res.status(500).json({
       success: false,
       message: "Something went wrong while updating profile.",
+      data: null,
     });
   }
 }
 
-async function changePassword(req, res) {
-  const transaction = await sequelize.transaction();
+async function uploadProfileMedia(req, res) {
+  // 1) Validate session
+  const sessionResult = await isUserSessionValid(req);
+  if (!sessionResult.success) return res.status(401).json(sessionResult);
+  const userId = Number(sessionResult.data);
 
-  try {
-    // 1) Validate body
-    const changePasswordSchema = Joi.object({
-      old_password: Joi.string().min(6).max(255).required(),
-      new_password: Joi.string().min(8).max(255).required(),
-      confirm_password: Joi.string().valid(Joi.ref("new_password")).required(),
+  // 2) Normalize incoming files
+  const incomingFiles = Array.isArray(req.files) ? req.files : [];
+  if (!incomingFiles.length) {
+    return res.status(400).json({
+      success: false,
+      message: "No files provided.",
+      data: null,
     });
-    const { error, value } = changePasswordSchema.validate(req.body, {
-      abortEarly: true,
-      stripUnknown: true,
+  }
+
+  const MAX_FILES = parseInt(await getOption("max_files_per_user", 5), 10);
+
+  // Your flow is "replace all", so keptCount is always 0
+  // Count cap check BEFORE any upload
+  if (incomingFiles.length > MAX_FILES) {
+    await cleanupTempFiles(incomingFiles);
+    return res.status(400).json({
+      success: false,
+      message: `Too many files. Max ${MAX_FILES} files allowed.`,
+      data: {
+        new_files: incomingFiles.length,
+        max: MAX_FILES,
+      },
     });
+  }
 
-    if (error) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: error.details[0].message,
-      });
-    }
-
-    const { old_password, new_password } = value;
-
-    // 2) Validate session (user must be logged in)
-    const sessionResult = await isUserSessionValid(req);
-    if (!sessionResult.success) {
-      await transaction.rollback();
-      return res.status(401).json(sessionResult);
-    }
-
-    const userId = Number(sessionResult.data);
-    if (!userId || Number.isNaN(userId)) {
-      await transaction.rollback();
-      return res.status(401).json({
-        success: false,
-        message: "Invalid session.",
-      });
-    }
-
-    // 3) Load user
-    const user = await User.findByPk(userId, { transaction });
-
-    if (!user) {
-      await transaction.rollback();
-      return res.status(404).json({
-        success: false,
-        message: "User not found.",
-      });
-    }
-
-    // Optional: block password change for social login-only users
-    if (user.register_type !== "manual") {
-      await transaction.rollback();
+  // 3) Verify files using magic bytes (fail fast)
+  // verifyFileType(file) should read the real file bytes (not just mimetype)
+  // and return: { ok:true, mime, ext } or { ok:false }
+  const verified = [];
+  for (const f of incomingFiles) {
+    const v = await verifyFileType(f);
+    if (!v || !v.ok) {
+      await cleanupTempFiles(incomingFiles);
       return res.status(400).json({
         success: false,
         message:
-          "Password cannot be changed for this account type. Please use your social login.",
+          "One or more files are invalid. Allowed: PNG, JPG, WEBP, HEIC/HEIF, GIF, PDF, DOC/X, XLS/X, CSV, TXT, RTF.",
+        data: null,
       });
     }
 
-    // 4) Compare old password
-    const isMatch = await bcrypt.compare(old_password, user.password);
-    if (!isMatch) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "Old password is incorrect.",
-      });
-    }
-
-    // 5) Prevent using same password again
-    const isSame = await bcrypt.compare(new_password, user.password);
-    if (isSame) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "New password must be different from old password.",
-      });
-    }
-
-    // 6) Hash new password
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(new_password, salt);
-
-    // 7) Update password
-    await user.update(
-      {
-        password: hashedPassword,
-        updated_at: new Date(),
-      },
-      { transaction }
-    );
-
-    // 8) Invalidate all active sessions for this user (force re-login everywhere)
-    await UserSession.destroy({
-      where: { user_id: userId },
-    });
-
-    //  If not found
-    if (!settings) {
-      settings = await UserSetting.create({
-        user_id: userId,
-      });
-    }
-
-    return res.json({
-      success: true,
-      message: "User settings fetched successfully",
-      data: {
-        settings,
-      },
-    });
-  } catch (err) {
-    console.error("getUserSettings error:", err);
-    return res.status(500).json({
-      success: false,
-      message: "Internal server error",
-    });
+    verified.push(v); // keep metadata if you need it later (mime/ext)
   }
-}
 
-async function updateUserSettings(req, res) {
+  // 4) Prepare metadata
+  const folder = `uploads/media/user/${userId}`;
+  const uploader_ip = getRealIp(req);
+  const user_agent = String(req.headers["user-agent"] || "").slice(0, 300);
+
   try {
-    // Validate session
-    const session = await isUserSessionValid(req);
-    if (!session.success) {
-      return res.status(401).json(session);
-    }
-    const userId = Number(session.data);
+    const result = await sequelize.transaction(async (transaction) => {
+      // 5) Lock + load existing rows to prevent replace races
+      const existing = await FileUpload.findAll({
+        where: { user_id: userId },
+        attributes: ["id", "name", "folders"],
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      });
 
-    //  Define validation schema
-    const schema = Joi.object({
-      notifications_enabled: Joi.boolean(),
-      email_notifications: Joi.boolean(),
-      show_online_status: Joi.boolean(),
+      // 6) Delete old files (storage + DB row)
+      for (const row of existing) {
+        try {
+          await deleteFile(row.name, row.folders, row.id, "user");
+        } catch (e) {
+          const err = new Error("Failed to remove existing media. Try again.");
+          err.statusCode = 500;
+          throw err;
+        }
+      }
 
-      preferred_gender: Joi.string().valid("male", "female", "any"),
+      // 7) Upload new files
+      const uploadedRows = [];
+      try {
+        for (let i = 0; i < incomingFiles.length; i++) {
+          const f = incomingFiles[i];
+          const v = verified[i];
 
-      age_range_min: Joi.number().integer().min(18).max(100),
-      age_range_max: Joi.number().integer().min(18).max(100),
+          // Prefer ext detected by magic bytes, fallback if needed
+          const detectedExt = v?.ext || null;
 
-      distance_range: Joi.number().integer().min(1).max(500),
+          // IMPORTANT: if uploadFile supports passing transaction, pass it
+          // so DB writes are part of the transaction.
+          const uploadRes = await uploadFile(
+            f,
+            folder,
+            detectedExt,
+            uploader_ip,
+            user_agent,
+            userId,
+            "user",
+            transaction // <-- add only if your uploadFile supports it
+          );
 
-      language: Joi.string().max(10),
+          uploadedRows.push(uploadRes);
+        }
+      } catch (uploadErr) {
+        // Attempt to remove any newly uploaded files to avoid partial replace
+        for (const up of uploadedRows) {
+          try {
+            // up should contain name/folders/id if uploadFile creates DB row
+            await deleteFile(up.name, up.folders, up.id, "user");
+          } catch (_) {
+            // swallow cleanup errors; original error is more important
+          }
+        }
+        throw uploadErr;
+      }
 
-      theme: Joi.string().valid("light", "dark", "auto"),
-    })
-      // allow partial updates but require at least one field
-      .min(1);
+      // 8) Read back DB as source of truth
+      const dbRows = await FileUpload.findAll({
+        where: { user_id: userId },
+        order: [["created_at", "DESC"]],
+        transaction,
+      });
 
-    const { error, value } = schema.validate(req.body, {
-      abortEarly: true,
-      allowUnknown: false,
+      return { dbRows };
     });
 
-    if (error) {
-      return res.status(400).json({
-        success: false,
-        message: error.details[0].message,
-      });
-    }
+    // 9) Always cleanup temp files (multer disk) after success too
+    await cleanupTempFiles(incomingFiles);
 
-    //  Additional logical validation: age min <= age max
-    if (
-      value.age_range_min !== undefined &&
-      value.age_range_max !== undefined &&
-      value.age_range_min > value.age_range_max
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: "Minimum age cannot be greater than maximum age",
-      });
-    }
-
-    //  Find or create settings row for this user
-    let settings = await UserSetting.findOne({
-      where: { user_id: userId },
-    });
-
-    if (!settings) {
-      settings = await UserSetting.create({
-        user_id: userId,
-      });
-    }
-
-    //  Apply updates
-    await settings.update(value);
-
-    return res.json({
+    return res.status(200).json({
       success: true,
-      message: "User settings updated successfully",
+      message: "Profile media updated successfully.",
       data: {
-        settings,
+        user_id: userId,
+        folder,
+        files: result.dbRows,
       },
     });
   } catch (err) {
-    console.error("updateUserSettings error:", err);
+    console.error("Error during uploadProfileMedia:", err);
+
+    // cleanup temp files on error too
+    await cleanupTempFiles(incomingFiles);
+
     return res.status(500).json({
       success: false,
-      message: "Internal server error",
+      message: "Something went wrong while uploading media.",
+      data: null,
     });
   }
 }
@@ -845,7 +395,9 @@ async function getUserSettings(req, res) {
     // Find settings
     let settings = await UserSetting.findOne({
       where: { user_id: userId },
+      raw: true,
     });
+
     // If not found, create with defaults
     if (!settings) {
       settings = await UserSetting.create({
@@ -861,17 +413,284 @@ async function getUserSettings(req, res) {
       },
     });
   } catch (err) {
-    console.error("getUserSettings error:", err);
+    console.error("Error during getUserSettings:", err);
     return res.status(500).json({
       success: false,
       message: "Internal server error",
     });
   }
 }
+
+async function updateUserSettings(req, res) {
+  // 1) Validate session
+  const session = await isUserSessionValid(req);
+  if (!session.success) return res.status(401).json(session);
+  const userId = Number(session.data);
+
+  try {
+    // 2) Validation
+    const schema = Joi.object({
+      notifications_enabled: Joi.boolean(),
+      email_notifications: Joi.boolean(),
+      show_online_status: Joi.boolean(),
+
+      preferred_gender: Joi.string().valid("male", "female", "any").trim(),
+
+      age_range_min: Joi.number().integer().min(18).max(100),
+      age_range_max: Joi.number().integer().min(18).max(100),
+
+      distance_range: Joi.number().integer().min(1).max(500),
+
+      language: Joi.string().trim().max(10),
+
+      theme: Joi.string().valid("light", "dark", "auto").trim(),
+    })
+      .min(1)
+      .required();
+
+    const { error, value } = schema.validate(req.body, {
+      abortEarly: true,
+      stripUnknown: true,
+      convert: true,
+    });
+
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.details?.[0]?.message || "Invalid input",
+        data: null,
+      });
+    }
+
+    // 3) Cross-field rule
+    // If only one side is provided, fetch the other side once (only when needed).
+    let ageMin = value.age_range_min;
+    let ageMax = value.age_range_max;
+
+    if (
+      (ageMin !== undefined && ageMax === undefined) ||
+      (ageMin === undefined && ageMax !== undefined)
+    ) {
+      const existing = await UserSetting.findOne({
+        where: { user_id: userId },
+        attributes: ["age_range_min", "age_range_max"],
+      });
+
+      if (ageMin === undefined) ageMin = existing?.age_range_min ?? undefined;
+      if (ageMax === undefined) ageMax = existing?.age_range_max ?? undefined;
+    }
+
+    if (
+      ageMin !== undefined &&
+      ageMax !== undefined &&
+      Number(ageMin) > Number(ageMax)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Minimum age cannot be greater than maximum age",
+        data: null,
+      });
+    }
+
+    // 4) No-op guard (if after validation nothing to update)
+    const updateKeys = Object.keys(value);
+    if (updateKeys.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "No valid fields provided",
+        data: null,
+      });
+    }
+
+    // 5) Scale-friendly write: UPSERT (atomic, avoids race conditions)
+    // Requires unique index on user_id in UserSetting table.
+    const payload = { user_id: userId, ...value };
+
+    // Sequelize: upsert returns [instance, created] in some dialects, boolean in others.
+    await UserSetting.upsert(payload);
+
+    // 6) Read-back (source of truth) with safe attributes only
+    const settings = await UserSetting.findOne({
+      where: { user_id: userId },
+      attributes: [
+        "user_id",
+        "notifications_enabled",
+        "email_notifications",
+        "show_online_status",
+        "preferred_gender",
+        "age_range_min",
+        "age_range_max",
+        "distance_range",
+        "language",
+        "theme",
+        "updated_at",
+      ],
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "User settings updated successfully",
+      data: { settings },
+    });
+  } catch (err) {
+    console.error("Error during updateUserSettings:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+      data: null,
+    });
+  }
+}
+
+async function changePassword(req, res) {
+  // 1) Validate body
+  const schema = Joi.object({
+    old_password: Joi.string().trim().min(6).max(255).required(),
+    new_password: Joi.string().trim().min(8).max(255).required(),
+    confirm_password: Joi.string()
+      .valid(Joi.ref("new_password"))
+      .required()
+      .messages({ "any.only": "Confirm password must match new password." }),
+  }).required();
+
+  const { error, value } = schema.validate(req.body, {
+    abortEarly: true,
+    stripUnknown: true,
+    convert: true,
+  });
+
+  if (error) {
+    return res.status(400).json({
+      success: false,
+      message: error.details?.[0]?.message || "Invalid input",
+      data: null,
+    });
+  }
+
+  const { old_password, new_password } = value;
+
+  // 2) Validate session (user must be logged in)
+  const sessionResult = await isUserSessionValid(req);
+  if (!sessionResult.success) {
+    return res.status(401).json(sessionResult);
+  }
+
+  const userId = Number(sessionResult.data);
+  if (!userId || Number.isNaN(userId)) {
+    return res.status(401).json({
+      success: false,
+      message: "Invalid session.",
+      data: null,
+    });
+  }
+
+  // 3) Transaction: update password + revoke sessions atomically
+  const t = await sequelize.transaction();
+  try {
+    // Lock user row to prevent concurrent password changes
+    const user = await User.findByPk(userId, {
+      transaction: t,
+      lock: t.LOCK.UPDATE,
+    });
+
+    if (!user) {
+      await t.rollback();
+      return res.status(404).json({
+        success: false,
+        message: "User not found.",
+        data: null,
+      });
+    }
+
+    // Block for social login-only accounts
+    if (user.register_type && user.register_type !== "manual") {
+      await t.rollback();
+      return res.status(400).json({
+        success: false,
+        message:
+          "Password cannot be changed for this account type. Use your social login.",
+        data: null,
+      });
+    }
+
+    // Ensure user has password set (edge case)
+    if (!user.password) {
+      await t.rollback();
+      return res.status(400).json({
+        success: false,
+        message: "This account does not have a password set.",
+        data: null,
+      });
+    }
+
+    // Compare old password
+    const isMatch = await bcrypt.compare(old_password, user.password);
+    if (!isMatch) {
+      await t.rollback();
+      return res.status(400).json({
+        success: false,
+        message: "Old password is incorrect.",
+        data: null,
+      });
+    }
+
+    // Prevent re-using same password
+    const isSame = await bcrypt.compare(new_password, user.password);
+    if (isSame) {
+      await t.rollback();
+      return res.status(400).json({
+        success: false,
+        message: "New password must be different from old password.",
+        data: null,
+      });
+    }
+
+    // Hash new password
+    const hashedPassword = await bcrypt.hash(new_password, 10);
+
+    // Update password
+    await user.update(
+      {
+        password: hashedPassword,
+        updated_at: new Date(),
+      },
+      { transaction: t }
+    );
+
+    // Revoke all sessions (force logout everywhere)
+    await UserSession.update(
+      { status: 2 },
+      {
+        where: { user_id: userId },
+        transaction: t,
+      }
+    );
+
+    await t.commit();
+
+    return res.status(200).json({
+      success: true,
+      message: "Password changed successfully. Please log in again.",
+      data: null,
+    });
+  } catch (err) {
+    try {
+      await t.rollback();
+    } catch (_) {}
+    console.error("Error during changePassword:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+      data: null,
+    });
+  }
+}
+
 module.exports = {
-  changePassword,
-  updateUserProfile,
   getUserProfile,
-  updateUserSettings,
+  updateUserProfile,
+  uploadProfileMedia,
   getUserSettings,
+  updateUserSettings,
+  changePassword,
 };

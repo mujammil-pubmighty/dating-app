@@ -24,6 +24,7 @@ async function run() {
 
     await set("total_maxpage_for_feed", 10);
     await set("default_per_page_feed", 10);
+    await set("max_files_per_user", 5);
 
     console.log("Options inserted/verified");
     process.exit(0);

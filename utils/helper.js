@@ -206,6 +206,28 @@ function randomFileName(ext = "webp") {
   return `DA-${crypto.randomBytes(16).toString("hex")}.${ext}`;
 }
 
+const normalizeInterests = (raw) => {
+  if (raw == null) return null;
+
+  let arr = [];
+  if (Array.isArray(raw)) arr = raw;
+  else if (typeof raw === "string") arr = raw.split(",");
+  else return null;
+
+  const interests = [
+    ...new Set(arr.map((v) => String(v).trim()).filter(Boolean)),
+  ].slice(0, 6);
+  return interests.length ? interests.join(",") : null;
+};
+
+const parseInterests = (stored) => {
+  if (!stored) return [];
+  return String(stored)
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+};
+
 module.exports = {
   getRealIp,
   getOption,
@@ -219,4 +241,6 @@ module.exports = {
   randomFileName,
   maskPhone,
   maskEmail,
+  normalizeInterests,
+  parseInterests,
 };

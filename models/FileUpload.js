@@ -61,33 +61,9 @@ const FileUpload = sequelize.define(
       allowNull: false,
     },
 
-    uploader_type: {
-      type: DataTypes.ENUM("admin", "employee"),
-      allowNull: false,
-    },
-
-    employee_id: {
+    user_id: {
       type: DataTypes.BIGINT.UNSIGNED,
       allowNull: true,
-    },
-
-    admin_id: {
-      type: DataTypes.BIGINT.UNSIGNED,
-      allowNull: true,
-    },
-
-    entity_type: {
-      type: DataTypes.STRING(200),
-      allowNull: true,
-      comment:
-        "Polymorphic relation: indicates which module/entity this file is attached to (e.g., branch, employee_doc, job_resume).",
-    },
-
-    entity_id: {
-      type: DataTypes.BIGINT.UNSIGNED,
-      allowNull: true,
-      comment:
-        "Polymorphic relation: primary key of the entity record referenced by entity_type.",
     },
 
     uploader_ip: {
@@ -111,24 +87,12 @@ const FileUpload = sequelize.define(
         fields: ["name", "folders"],
       },
       {
-        name: "idx_entity_type_entity_id",
-        fields: ["entity_type", "entity_id"],
-      },
-      {
         name: "idx_file_type",
         fields: ["file_type"],
       },
       {
-        name: "idx_uploader_type",
-        fields: ["uploader_type"],
-      },
-      {
-        name: "idx_employee",
-        fields: ["employee_id"],
-      },
-      {
-        name: "idx_admin",
-        fields: ["admin_id"],
+        name: "idx_user",
+        fields: ["user_id"],
       },
     ],
   }

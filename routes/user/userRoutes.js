@@ -214,6 +214,99 @@ router.get("/feed/recommended", feedController.getRecommendedFeed);
  */
 router.get("/feed/:id", feedController.getFeedUser);
 
+/**
+ * 1. GET /profile
+ * ------------------------------------------------------------
+ * Fetches the authenticated user's full profile data.
+ *
+ * - Requires a valid authenticated session.
+ * - Returns profile information owned by the logged-in user.
+ * - Includes avatar and profile media URLs if available.
+ * - Does NOT expose sensitive fields such as password,
+ *   authentication tokens, or internal flags.
+ */
+router.get("/profile", userController.getUserProfile);
+/**
+ * 2. POST /profile
+ * ------------------------------------------------------------
+ * Updates the authenticated user's core profile information.
+ *
+ * - Requires a valid authenticated session.
+ * - Accepts multipart/form-data.
+ * - Supports optional avatar upload via "avatar" field.
+ * - Avatar file is first validated server-side (magic bytes, size, type).
+ * - Existing avatar (if any) is safely replaced (storage + DB).
+ * - Profile fields are partially updatable (only provided fields are changed).
+ * - Rejects invalid file types, oversized files, or malformed input.
+ * - Prevents unauthorized profile updates.
+ */
+router.post(
+  "/profile",
+  fileUploader.single("avatar"),
+  userController.updateUserProfile
+);
+/**
+ * 3. POST /profile/media
+ * ------------------------------------------------------------
+ * Uploads and replaces the authenticated user's profile media gallery.
+ *
+ * - Requires a valid authenticated session.
+ * - Accepts multipart/form-data with multiple files.
+ * - Field name must be "media".
+ * - Enforces a maximum number of media files per user
+ *   (value fetched dynamically from site settings).
+ * - All incoming files are verified using magic-byte detection.
+ * - Existing media files for the user are fully deleted
+ *   (both storage and DB) before new uploads.
+ * - Upload and DB writes are handled atomically to avoid partial states.
+ * - Temporary files are always cleaned up (success or failure).
+ */
+router.post(
+  "/profile/media",
+  fileUploader.array("media", 10),
+  userController.uploadProfileMedia
+);
+/**
+ * 4. GET /profile/settings
+ * ------------------------------------------------------------
+ * Fetches the authenticated user's application and privacy settings.
+ *
+ * - Requires a valid authenticated session.
+ * - Returns user-specific preferences such as:
+ *   - Notification preferences
+ *   - Discovery preferences (age range, gender, distance)
+ *   - Privacy options (online status visibility)
+ *   - UI preferences (language, theme)
+ * - If settings row does not exist, returns defaults.
+ */
+router.get("/profile/settings", userController.getUserSettings);
+/**
+ * 5. POST /profile/settings
+ * ------------------------------------------------------------
+ * Updates the authenticated user's application and privacy settings.
+ *
+ * - Requires a valid authenticated session.
+ * - Accepts partial updates (only provided fields are changed).
+ * - Validates all fields strictly (no unknown keys allowed).
+ * - Enforces logical constraints (e.g. min age <= max age).
+ * - Uses upsert strategy to safely handle first-time users.
+ */
+router.post("/profile/settings", userController.updateUserSettings);
+/**
+ * 6. POST /profile/change-password
+ * ------------------------------------------------------------
+ * Changes the authenticated user's account password.
+ *
+ * - Requires a valid authenticated session.
+ * - User must have a manual (email/password) account.
+ * - Validates old password before allowing change.
+ * - Prevents reusing the current password.
+ * - New password is securely hashed before storage.
+ * - Invalidates all active sessions after successful change
+ *   (forces re-login on all devices).
+ */
+router.post("/profile/change-password", userController.changePassword);
+
 //chatting between user1 & user2
 router.post(
   "/chats/:chatId/messages",
@@ -227,16 +320,6 @@ router.post("/chats/pin", chatController.pinChats);
 router.post("/chats/:chatId/block", chatController.blockChat);
 router.post("/chats/:chatId/read", chatController.markChatMessagesRead);
 router.post("/chats/delete", chatController.deleteChat);
-
-router.post(
-  "/profile",
-  fileUploader.single("avatar"),
-  userController.updateUserProfile
-);
-router.get("/profile", userController.getUserProfile);
-//settings
-router.post("/settings", userController.updateUserSettings);
-router.get("/settings", userController.getUserSettings);
 
 //ads view
 router.get("/ads/status", adsController.getAdStatus);

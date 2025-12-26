@@ -154,12 +154,9 @@ async function uploadFile(
   file,
   folder,
   detectedExt = null,
-  entity_type = null,
-  entity_id = null,
   uploader_ip = null,
   user_agent = null,
-  admin_id = null,
-  employee_id = null,
+  user_id = null,
   recordType = "chat"
 ) {
   if (!file || !file.path) throw new Error("Missing file");
@@ -337,11 +334,7 @@ async function uploadFile(
         size: finalSize, // bytes
         file_type: outputExt, // helpful for querying
         mime_type: finalMime,
-        uploader_type: admin_id ? "admin" : "employee",
-        employee_id,
-        admin_id,
-        entity_type,
-        entity_id, // <-- not clobbering entity_type
+        user_id,
         uploader_ip,
         user_agent,
       });
@@ -370,7 +363,7 @@ async function uploadFile(
  * @param {string} folder - The folder where the file is stored.
  * @returns {Promise<boolean>} - Returns true if deletion is successful, false otherwise.
  */
-async function deleteFile(fileName, folder, id = null) {
+async function deleteFile(fileName, folder, id = null, recordType = "chat") {
   try {
     if (!fileName || !folder) return false;
 
@@ -387,11 +380,14 @@ async function deleteFile(fileName, folder, id = null) {
     await fs.remove(filePath);
 
     if (id) {
-      await FileUpload.destroy({
-        where: {
-          id: id,
-        },
-      });
+      if (recordType === "chat") {
+      } else {
+        await FileUpload.destroy({
+          where: {
+            id: id,
+          },
+        });
+      }
     }
 
     return true;
