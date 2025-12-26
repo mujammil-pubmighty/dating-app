@@ -22,6 +22,9 @@ async function run() {
     await set("max_pinned_chats", 10);
     await set("google_client_id", "12345678");
 
+    await set("total_maxpage_for_feed", 10);
+    await set("default_per_page_feed", 10);
+
     console.log("Options inserted/verified");
     process.exit(0);
   } catch (e) {

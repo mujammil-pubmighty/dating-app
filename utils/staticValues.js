@@ -1,3 +1,26 @@
+const publicFeedUserAttributes = [
+"id",
+"username",
+"email",
+"phone",
+"gender",
+"city",
+"state",
+"country",
+"address",
+"avatar",
+"dob",
+"bio",
+"interests",
+"looking_for",
+"total_likes",
+"total_matches",
+"total_rejects",
+"height",
+"education",
+"is_verified",
+];
+
 const publicUserAttributes = [
 "id",
 "username",
@@ -28,6 +51,7 @@ const ALLOWED_MIME = new Set(["image/jpeg", "image/png", "image/webp"]);
 
 
 module.exports = {
+    publicFeedUserAttributes,
     publicUserAttributes,
     BCRYPT_ROUNDS,
     MAX_AVATAR_BYTES,

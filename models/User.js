@@ -169,11 +169,14 @@ const User = sequelize.define(
     timestamps: true,
     underscored: true,
     indexes: [
-      { fields: ["email"] },
-      { fields: ["username"] },
-      { fields: ["type"] },
-      { fields: ["is_active"] },
-      { fields: ["created_at"] },
+      { name: "idx_unique_email", fields: ["email"], unique: true },
+      { name: "idx_unique_username", fields: ["username"], unique: true },
+      {
+        name: "idx_type_is_active_gender_created_at",
+        fields: ["type", "is_active", "gender", "created_at"],
+      },
+      { name: "idx_is_active", fields: ["is_active"] },
+      { name: "idx_created_at", fields: ["created_at"] },
     ],
   }
 );

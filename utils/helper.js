@@ -135,30 +135,29 @@ function getDobRangeFromAges(minAge, maxAge) {
 }
 
 function maskPhone(phone) {
-  if (!phone || phone.length < 4) return phone;
+  if (!phone || typeof phone !== "string") return null;
 
-  const str = phone.toString();
-  const first = str.slice(0, 2);
-  const last = str.slice(-1);
+  const digits = phone.replace(/\D/g, "");
+  if (digits.length <= 4) return "***";
 
-  return `${first}${"*".repeat(str.length - 3)}${last}`;
+  const start = digits.slice(0, 2);
+  const end = digits.slice(-2);
+  return `${start}****${end}`;
 }
 
 function maskEmail(email) {
-  if (!email || !email.includes("@")) return email;
+  if (!email || typeof email !== "string" || !email.includes("@")) return email;
 
   const [name, domain] = email.split("@");
+  if (!domain) return "***";
 
   if (domain.length <= 2) {
     return `${name}@**`;
   }
 
-  const firstChar = domain[0];
-  const lastChar = domain.slice(-1);
-
-  return `${name}@${"*".repeat(domain.length - 2)}${lastChar}`;
+  const visible = local.slice(0, 2);
+  return `${visible}***@${domain}`;
 }
-
 
 function validateCallParticipants(chat, callerId, receiverId) {
   const p1 = chat.participant_1_id;

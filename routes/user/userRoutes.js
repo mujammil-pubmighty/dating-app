@@ -9,6 +9,7 @@ const adsController = require("../../controllers/user/adViewController");
 const { fileUploader } = require("../../utils/helpers/fileUpload");
 const videoCallConroller = require("../../controllers/user/videoCallConroller");
 const mediaController = require("../../controllers/user/userMediaController");
+const feedController = require("../../controllers/user/feedController");
 const {
   verifyGooglePlayPurchase,
 } = require("../../controllers/user/googleBillingController");
@@ -164,6 +165,55 @@ router.get("/coins/packages", coinController.getCoinPackages);
  */
 router.get("/coins/purchases", coinController.getUserCoinPurchases);
 
+/**
+ * Feed Routes
+ */
+
+/**
+ * 1. GET /feed
+ *    - Fetches the standard feed of bot profiles.
+ *    - Works for both guests and logged-in users.
+ *    - Supports filters: gender, name (prefix search).
+ *    - Supports pagination + sorting (sortBy/sortOrder).
+ *    - Logged-in users get interaction flags per profile:
+ *      isLiked, isRejected, isMatched, canLike.
+ *    - Masks sensitive fields like email/phone in the response.
+ */
+router.get("/feed", feedController.getFeed);
+
+/**
+ * 2. GET /feed/random
+ *    - Fetches a randomized feed of bot profiles (shuffle style).
+ *    - Works for both guests and logged-in users.
+ *    - Supports gender filtering + pagination.
+ *    - Logged-in users get interaction flags per profile:
+ *      isLiked, isRejected, isMatched, canLike.
+ *    - Guests still get the same response shape (flags defaulted).
+ *    - Masks sensitive fields like email/phone in the response.
+ */
+router.get("/feed/random", feedController.getRandomFeed);
+
+/**
+ * 3. GET /feed/recommended
+ *    - Fetches personalized recommended bot profiles for the logged-in user.
+ *    - Login is mandatory (recommendations require user settings/preferences).
+ *    - Applies user preferences from settings (preferred gender + age range).
+ *    - Supports pagination (page/perPage).
+ *    - Returns interaction flags per profile:
+ *      isLiked, isRejected, isMatched, canLike.
+ *    - Masks sensitive fields like email/phone in the response.
+ */
+router.get("/feed/recommended", feedController.getRecommendedFeed);
+/**
+ * 4. GET /feed/:id
+ *    - Fetches a single feed user profile by ID.
+ *    - Intended for profile detail view / user preview.
+ *    - Should validate :id and ensure the target profile is active/allowed.
+ *    - If logged-in, can include interaction status between viewer and target.
+ *    - Masks sensitive fields like email/phone in the response.
+ */
+router.get("/feed/:id", feedController.getFeedUser);
+
 //chatting between user1 & user2
 router.post(
   "/chats/:chatId/messages",
@@ -178,25 +228,19 @@ router.post("/chats/:chatId/block", chatController.blockChat);
 router.post("/chats/:chatId/read", chatController.markChatMessagesRead);
 router.post("/chats/delete", chatController.deleteChat);
 
-//user + bot
-router.get("/persons", userController.getAllPersons);
-router.get("/persons/random", userController.getRandomPersons);
-router.get("/persons/recommended", userController.getRecommendedPersons);
-router.get("/persons/:id", userController.getPersonById);
 router.post(
   "/profile",
   fileUploader.single("avatar"),
   userController.updateUserProfile
 );
 router.get("/profile", userController.getUserProfile);
+//settings
+router.post("/settings", userController.updateUserSettings);
+router.get("/settings", userController.getUserSettings);
 
 //ads view
 router.get("/ads/status", adsController.getAdStatus);
 router.post("/ads/complete", adsController.completeAdView);
-
-//settings
-router.post("/settings", userController.updateUserSettings);
-router.get("/settings", userController.getUserSettings);
 
 //video call
 router.post(
