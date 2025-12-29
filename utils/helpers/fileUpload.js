@@ -3,7 +3,6 @@ const fs = require("fs-extra");
 const fsp = require("node:fs/promises"); // low-level fd.open/read
 const sharp = require("sharp");
 const multer = require("multer");
-const { getOption } = require("./helper");
 const { PDFDocument, PDFName, PDFDict } = require("pdf-lib");
 const mimeTypes = require("mime-types");
 const AdmZip = require("adm-zip");
@@ -11,7 +10,7 @@ const FileUpload = require("../../models/FileUpload");
 const { default: axios } = require("axios");
 const { MAX_AVATAR_BYTES, ALLOWED_MIME } = require("../staticValues");
 const { fileTypeFromBuffer } = require("file-type");
-const { randomFileName } = require("../helper");
+const { randomFileName, getOption } = require("../helper");
 const MessageFile = require("../../models/MessageFile");
 
 const fileUploader = multer({

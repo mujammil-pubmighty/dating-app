@@ -4,7 +4,6 @@ const { Op } = require("sequelize");
 
 const Chat = require("../../models/Chat");
 const User = require("../../models/User");
-const Message = require("../../models/Message"); // for transactions
 const VideoCall = require("../../models/VideoCall");
 const CoinSpentTransaction = require("../../models/CoinSpentTransaction");
 const { isUserSessionValid } = require("../../utils/helpers/authHelper");

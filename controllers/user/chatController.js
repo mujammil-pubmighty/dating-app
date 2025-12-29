@@ -1,14 +1,12 @@
 const Joi = require("joi");
 const Message = require("../../models/Message");
 const Chat = require("../../models/Chat");
-const Sequelize = require("sequelize");
 const { Op } = require("sequelize");
 const User = require("../../models/User");
 const CoinSpentTransaction = require("../../models/CoinSpentTransaction");
 const { generateBotReplyForChat } = require("../../utils/helpers/aiHelper");
 const {
   getOption,
-  typingTime,
   normalizeFiles,
   safeTrim,
   toNullableInt,

@@ -2,7 +2,6 @@ const Option = require("../models/Option");
 const path = require("path");
 const maxmind = require("maxmind");
 const { Op } = require("sequelize");
-const Chat = require("../models/Chat");
 const UAParser = require("ua-parser-js");
 
 // global variables

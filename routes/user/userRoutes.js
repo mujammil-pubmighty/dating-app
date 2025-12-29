@@ -8,7 +8,6 @@ const chatController = require("../../controllers/user/chatController");
 const adsController = require("../../controllers/user/adViewController");
 const { fileUploader } = require("../../utils/helpers/fileUpload");
 const videoCallConroller = require("../../controllers/user/videoCallConroller");
-const mediaController = require("../../controllers/user/userMediaController");
 const feedController = require("../../controllers/user/feedController");
 const {
   verifyGooglePlayPurchase,
@@ -511,15 +510,6 @@ router.get(
   videoCallConroller.getVideoCallStatus
 );
 router.get("/video-calls", videoCallConroller.getVideoCallHistory);
-
-// user media
-router.post(
-  "/media",
-  fileUploader.single("file"),
-  mediaController.uploadUserMedia
-);
-router.get("/media", mediaController.getMyMedia);
-router.post("/media/:id", mediaController.deleteMyMedia);
 
 //google billing
 router.post("/billing/google-play/verify", verifyGooglePlayPurchase);

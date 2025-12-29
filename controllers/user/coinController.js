@@ -1,10 +1,5 @@
 const { Op } = require("sequelize");
 const Joi = require("joi");
-const sequelize = require("../../config/db");
-const User = require("../../models/User");
-const Chat = require("../../models/Chat");
-const Message = require("../../models/Message");
-const CoinSpentTransaction = require("../../models/CoinSpentTransaction");
 const CoinPurchaseTransaction = require("../../models/CoinPurchaseTransaction");
 const CoinPackage = require("../../models/CoinPackage");
 const { isUserSessionValid } = require("../../utils/helpers/authHelper");

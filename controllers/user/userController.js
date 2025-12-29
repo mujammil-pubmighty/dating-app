@@ -4,21 +4,15 @@ const User = require("../../models/User");
 const UserSetting = require("../../models/UserSetting");
 const {
   getOption,
-  getDobRangeFromAges,
-  maskEmail,
-  maskPhone,
   getRealIp,
   normalizeFiles,
 } = require("../../utils/helper");
 const {
-  fileUploader,
   uploadImage,
   verifyFileType,
   deleteFile,
   cleanupTempFiles,
 } = require("../../utils/helpers/fileUpload");
-const { Op } = require("sequelize");
-const { compressImage } = require("../../utils/helpers/imageCompressor");
 const { logActivity } = require("../../utils/helpers/activityLogHelper");
 const { isUserSessionValid } = require("../../utils/helpers/authHelper");
 const { publicUserAttributes } = require("../../utils/staticValues");
