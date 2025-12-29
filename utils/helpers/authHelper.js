@@ -24,16 +24,16 @@ async function handleUserSessionCreation(req, user, transaction = null) {
 
   const token = crypto.randomBytes(32).toString("base64url");
   const now = new Date();
-  const expiresAt = new Date(now.getTime() + maxSessionSeconds * 1000);
+  const expires_at = new Date(now.getTime() + maxSessionSeconds * 1000);
 
   // expire old sessions for this user
   await UserSession.update(
     { status: 2 },
     {
       where: {
-        userId: user.id,
+        user_id: user.id,
         status: 1,
-        expiresAt: { [Op.lt]: now },
+        expires_at: { [Op.lt]: now },
       },
       transaction,
     }
@@ -41,43 +41,43 @@ async function handleUserSessionCreation(req, user, transaction = null) {
 
   // count active sessions
   const activeCount = await UserSession.count({
-    where: { userId: user.id, status: 1 },
+    where: { user_id: user.id, status: 1 },
     transaction,
   });
 
   const maxUserSessions = parseInt(await getOption("max_user_sessions", 4), 10);
 
   const sessionPayload = {
-    userId: user.id,
-    sessionToken: token,
+    user_id: user.id,
+    session_token: token,
     ip,
     userAgent: userAgentData.userAgent,
     country: locationData.countryCode,
     os: userAgentData.os,
     browser: userAgentData.browser,
     status: 1,
-    expiresAt,
+    expires_at,
   };
 
   if (activeCount < maxUserSessions) {
     await UserSession.create(sessionPayload, { transaction });
-    return { token, expiresAt };
+    return { token, expires_at };
   }
 
   // reuse oldest session if above limit
   const oldestActive = await UserSession.findOne({
-    where: { userId: user.id },
-    order: [["expiresAt", "ASC"]],
+    where: { user_id: user.id },
+    order: [["expires_at", "ASC"]],
     transaction,
   });
 
   if (!oldestActive) {
     await UserSession.create(sessionPayload, { transaction });
-    return { token, expiresAt };
+    return { token, expires_at };
   }
 
   await oldestActive.update(sessionPayload, { transaction });
-  return { token, expiresAt };
+  return { token, expires_at };
 }
 
 // Validate user session
@@ -95,7 +95,7 @@ async function isUserSessionValid(req) {
     const token = authHeader.split(" ")[1];
 
     const session = await UserSession.findOne({
-      where: { sessionToken: token, status: 1 },
+      where: { session_token: token, status: 1 },
     });
 
     if (!session) {
@@ -103,7 +103,7 @@ async function isUserSessionValid(req) {
     }
 
     const now = new Date();
-    if (session.expiresAt && session.expiresAt < now) {
+    if (session.expires_at && session.expires_at < now) {
       await session.update({ status: 2 });
       return { success: false, message: "Session expired", data: null };
     }
@@ -127,7 +127,7 @@ async function isUserSessionValid(req) {
     return {
       success: true,
       message: "Session is valid",
-      data: session.userId,
+      data: session.user_id,
     };
   } catch (err) {
     console.error("Auth error (user):", err);

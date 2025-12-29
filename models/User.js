@@ -46,8 +46,7 @@ const User = sequelize.define(
 
     full_name: {
       type: DataTypes.STRING(300),
-      allowNull: false,
-      unique: true,
+      allowNull: true,
     },
 
     gender: {

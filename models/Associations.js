@@ -6,6 +6,7 @@ const CoinPackage = require("./CoinPackage");
 const CoinPurchaseTransaction = require("./CoinPurchaseTransaction");
 const UserMedia = require("./UserMedia");
 const ActivityLog = require("./ActivityLog");
+const MessageFile = require("./MessageFile");
 
 function setupAssociations() {
   User.hasMany(UserInteraction, {
@@ -62,16 +63,6 @@ function setupAssociations() {
     onDelete: "CASCADE",
   });
 
-  User.hasMany(Chat, {
-    as: "ChatAsParticipant1",
-    foreignKey: "participant_1_id",
-  });
-
-  User.hasMany(Chat, {
-    as: "ChatAsParticipant2",
-    foreignKey: "participant_2_id",
-  });
-
   Chat.hasMany(Message, {
     foreignKey: "chat_id",
     as: "messages",
@@ -83,9 +74,24 @@ function setupAssociations() {
     as: "lastMessage",
   });
 
+  User.hasMany(Chat, {
+    as: "ChatAsParticipant1",
+    foreignKey: "participant_1_id",
+  });
+
+  User.hasMany(Chat, {
+    as: "ChatAsParticipant2",
+    foreignKey: "participant_2_id",
+  });
+
   Message.belongsTo(Chat, {
     foreignKey: "chat_id",
     as: "chat",
+  });
+
+  Message.belongsTo(Message, {
+    foreignKey: "reply_to_message_id",
+    as: "reply_to",
   });
 
   Message.belongsTo(User, {
@@ -97,6 +103,12 @@ function setupAssociations() {
     foreignKey: "receiver_id",
     as: "receiver",
   });
+
+  Message.hasMany(MessageFile, {
+    foreignKey: "message_id",
+    as: "messageFiles",
+  });
+
   CoinPurchaseTransaction.belongsTo(CoinPackage, {
     foreignKey: "coin_pack_id",
     as: "package",
@@ -112,10 +124,12 @@ function setupAssociations() {
     onUpdate: "CASCADE",
   });
   ActivityLog.belongsTo(User, {
-     foreignKey: "user_id", as: "user" 
-    });
-  User.hasMany(ActivityLog, { 
-    foreignKey: "user_id", as: "activity_logs" 
+    foreignKey: "user_id",
+    as: "user",
+  });
+  User.hasMany(ActivityLog, {
+    foreignKey: "user_id",
+    as: "activity_logs",
   });
 }
 

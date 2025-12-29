@@ -8,6 +8,7 @@ const {
   maskEmail,
   maskPhone,
   getRealIp,
+  normalizeFiles,
 } = require("../../utils/helper");
 const {
   fileUploader,
@@ -239,7 +240,7 @@ async function uploadProfileMedia(req, res) {
   const userId = Number(sessionResult.data);
 
   // 2) Normalize incoming files
-  const incomingFiles = Array.isArray(req.files) ? req.files : [];
+  const incomingFiles = normalizeFiles(req);
   if (!incomingFiles.length) {
     return res.status(400).json({
       success: false,

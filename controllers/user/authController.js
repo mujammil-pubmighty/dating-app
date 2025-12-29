@@ -23,6 +23,7 @@ const {
 const { sendOtpMail } = require("../../utils/helpers/mailHelper");
 const sequelize = require("../../config/db");
 const UserSession = require("../../models/UserSession");
+const { Op } = require("sequelize");
 
 async function registerWithGoogle(req, res) {
   try {
@@ -266,7 +267,7 @@ async function registerUser(req, res) {
     // Uniqueness checks
     if (hasEmail) {
       const existingEmail = await User.findOne({
-        where: { email: email.username.toLowerCase() },
+        where: { email: email.toLowerCase() },
       });
       if (existingEmail) {
         return res.status(409).json({
@@ -374,7 +375,7 @@ async function registerUser(req, res) {
       is_verified: false, // phone OTP not implemented here
     });
 
-    const { token, expires_at } = await handleUserSessionCreation(req, user.id);
+    const { token, expires_at } = await handleUserSessionCreation(req, user);
     await user.reload({ attributes: publicUserAttributes });
 
     return res.status(201).json({
@@ -561,7 +562,7 @@ async function verifyRegister(req, res) {
     await t.commit();
 
     // Session outside the transaction
-    const { token, expires_at } = await handleUserSessionCreation(req, user.id);
+    const { token, expires_at } = await handleUserSessionCreation(req, user);
 
     await user.reload({ attributes: publicUserAttributes });
 
@@ -661,7 +662,7 @@ async function loginUser(req, res) {
       });
     }
 
-    const { token, expires_at } = await handleUserSessionCreation(req, user.id);
+    const { token, expires_at } = await handleUserSessionCreation(req, user);
 
     await user.reload({ attributes: publicUserAttributes });
 

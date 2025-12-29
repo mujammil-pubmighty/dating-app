@@ -1,85 +1,55 @@
-const path = require("path");
-const multer = require("multer");
-const crypto = require("crypto");
-const fs = require("fs");
-
-const CHAT_TMP_DIR = path.join(process.cwd(), "public", "tmp", "chat");
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, CHAT_TMP_DIR),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname || "");
-    const name = crypto.randomBytes(16).toString("hex") + ext.toLowerCase();
-    cb(null, name);
-  },
-});
-
-const fileFilter = (req, file, cb) => {
-  const okMime = [
-    // images
-    "image/png",
-    "image/jpeg",
-    "image/jpg",
-    "image/webp",
-    "image/heic",
-    "image/heif",
-
-    // audio
-    "audio/mpeg",
-    "audio/mp4",
-    "audio/aac",
-    "audio/ogg",
-    "audio/webm",
-    "audio/wav",
-  ];
-
-  if (!okMime.includes(file.mimetype)) {
-    return cb(new Error("INVALID_FILE_TYPE"), false);
-  }
-  cb(null, true);
-};
-
-const uploadChatMedia = multer({
-  storage,
-  fileFilter,
-  limits: {
-    fileSize: 2500 * 1024 * 1024, // 25MB
-  },
-});
-
-function ensureDir(dir) {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-}
-
-async function moveTmpToChatUploads(tmpFilePath, filename) {
-  const chatDir = path.join(process.cwd(), "public", "uploads", "chat");
-  ensureDir(chatDir);
-
-  const destPath = path.join(chatDir, filename);
-
-  await fs.promises.rename(tmpFilePath, destPath);
-
-  return filename;
-}
+const Chat = require("../../models/Chat");
+const User = require("../../models/User");
 
 async function getOrCreateChatBetweenUsers(userIdA, userIdB, transaction) {
-  // Optional: normalize to avoid duplicate chats
-  const [p1, p2] =
-    Number(userIdA) < Number(userIdB)
-      ? [Number(userIdA), Number(userIdB)]
-      : [Number(userIdB), Number(userIdA)];
+  // 0) Validate inputs early
+  const a = Number(userIdA);
+  const b = Number(userIdB);
 
-  let chat = await Chat.findOne({
-    where: {
-      participant_1_id: p1,
-      participant_2_id: p2,
-    },
+  if (!Number.isInteger(a) || a <= 0 || !Number.isInteger(b) || b <= 0) {
+    throw new Error("Invalid user ids");
+  }
+  if (a === b) {
+    throw new Error("Cannot create chat with same user");
+  }
+
+  // 1) Fetch both users (minimal fields) to know who is bot
+  const users = await User.findAll({
+    where: { id: { [Op.in]: [a, b] } },
+    attributes: ["id", "type"],
     transaction,
   });
 
-  if (!chat) {
-    chat = await Chat.create(
-      {
+  if (users.length !== 2) {
+    throw new Error("One or both users not found");
+  }
+
+  const uA = users.find((u) => u.id === a);
+  const uB = users.find((u) => u.id === b);
+
+  const aIsBot = uA.type === "bot";
+  const bIsBot = uB.type === "bot";
+
+  // 2) Determine canonical ordering
+  // Rule: if one is bot and the other is real -> bot must be p1
+  // Else: numeric sort to avoid duplicates
+  let p1, p2;
+
+  if (aIsBot !== bIsBot) {
+    // exactly one bot
+    p1 = aIsBot ? a : b;
+    p2 = aIsBot ? b : a;
+  } else {
+    // both bots or both real -> stable numeric order
+    [p1, p2] = a < b ? [a, b] : [b, a];
+  }
+
+  // 3) Race-safe find-or-create
+  // NOTE: findOrCreate is safe only if you have the UNIQUE index.
+  try {
+    const [chat] = await Chat.findOrCreate({
+      where: { participant_1_id: p1, participant_2_id: p2 },
+      defaults: {
         participant_1_id: p1,
         participant_2_id: p2,
         last_message_id: null,
@@ -91,15 +61,29 @@ async function getOrCreateChatBetweenUsers(userIdA, userIdB, transaction) {
         chat_status_p1: "active",
         chat_status_p2: "active",
       },
-      { transaction }
-    );
-  }
+      transaction,
+    });
 
-  return chat;
+    return chat;
+  } catch (err) {
+    // If two requests raced, one will hit unique constraint. Fetch existing.
+    // Sequelize unique constraint error names vary by dialect.
+    const isUnique =
+      err?.name === "SequelizeUniqueConstraintError" ||
+      err?.original?.code === "ER_DUP_ENTRY";
+
+    if (!isUnique) throw err;
+
+    const chat = await Chat.findOne({
+      where: { participant_1_id: p1, participant_2_id: p2 },
+      transaction,
+    });
+
+    if (!chat) throw err; // extremely rare, but be honest
+    return chat;
+  }
 }
 
 module.exports = {
-  moveTmpToChatUploads,
-  uploadChatMedia,
   getOrCreateChatBetweenUsers,
 };

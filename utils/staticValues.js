@@ -49,6 +49,13 @@ const BCRYPT_ROUNDS = 12;
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024; // 2MB hard limit
 const ALLOWED_MIME = new Set(["image/jpeg", "image/png", "image/webp"]);
 
+    const fallbackMessages = [
+      "Hey! I'm here 🙂",
+      "I was thinking about you just now.",
+      "Tell me more, I'm really curious.",
+      "That sounds interesting, go on 🙂",
+      "You make this chat more fun!",
+    ];
 
 module.exports = {
     publicFeedUserAttributes,
@@ -56,4 +63,5 @@ module.exports = {
     BCRYPT_ROUNDS,
     MAX_AVATAR_BYTES,
     ALLOWED_MIME,
+    fallbackMessages,
 }

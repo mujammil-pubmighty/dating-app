@@ -25,10 +25,46 @@ const MessageFile = sequelize.define(
       allowNull: false,
     },
 
-    filename: {
-      type: DataTypes.STRING(255),
+    name: {
+      type: DataTypes.STRING(300),
       allowNull: false,
-      comment: "Stored file path or filename",
+    },
+
+    folders: {
+      type: DataTypes.STRING(300),
+      allowNull: false,
+    },
+
+    size: {
+      type: DataTypes.BIGINT.UNSIGNED,
+      allowNull: false,
+    },
+
+    file_type: {
+      type: DataTypes.STRING(16),
+      allowNull: false,
+      validate: {
+        isInAllowList(value) {
+          if (!ALLOWED_EXTS.includes(String(value).toLowerCase())) {
+            throw new Error("Extension not allowed");
+          }
+        },
+      },
+    },
+
+    // Full MIME type from server-side detection (NOT client-provided)
+    mime_type: {
+      type: DataTypes.STRING(100),
+      allowNull: false,
+    },
+
+    uploader_ip: {
+      type: DataTypes.STRING(45),
+      allowNull: true,
+    },
+    user_agent: {
+      type: DataTypes.STRING(300),
+      allowNull: true,
     },
   },
   {

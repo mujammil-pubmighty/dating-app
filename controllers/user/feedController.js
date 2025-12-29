@@ -2,7 +2,7 @@ const Joi = require("joi");
 const sequelize = require("../../config/db");
 const User = require("../../models/User");
 const UserSetting = require("../../models/UserSetting");
-const { Op } = require("sequelize");
+const { Op, literal } = require("sequelize");
 const { isUserSessionValid } = require("../../utils/helpers/authHelper");
 const { getOption, maskEmail, maskPhone } = require("../../utils/helper");
 const { publicFeedUserAttributes } = require("../../utils/staticValues");
@@ -133,7 +133,7 @@ async function getFeed(req, res) {
     // 6) Query
     const result = await User.findAndCountAll({
       where,
-      attributes: [...publicFeedUserAttributes, ...interactionAttributes],
+      attributes: [...publicFeedUserAttributes, ...interactionAttributes.include],
       order: [[value.sortBy, value.sortOrder]],
       limit: perPage,
       offset,
@@ -291,7 +291,7 @@ async function getRandomFeed(req, res) {
 
     const result = await User.findAndCountAll({
       where,
-      attributes: [...publicFeedUserAttributes, ...interactionAttributes],
+      attributes: [...publicFeedUserAttributes, ...interactionAttributes.include],
       order: sequelize.random(), // random rows
       limit: perPage,
       offset,
@@ -492,7 +492,7 @@ async function getRecommendedFeed(req, res) {
     // 7) Query
     const result = await User.findAndCountAll({
       where,
-      attributes: [...publicFeedUserAttributes, ...interactionAttributes],
+      attributes: [...publicFeedUserAttributes, ...interactionAttributes.include],
       order: [
         ["last_active", "DESC"],
         ["id", "DESC"],

@@ -7,11 +7,12 @@ const { getOption } = require("./helper");
 const { PDFDocument, PDFName, PDFDict } = require("pdf-lib");
 const mimeTypes = require("mime-types");
 const AdmZip = require("adm-zip");
-const FileUpload = require("../models/FileUpload");
+const FileUpload = require("../../models/FileUpload");
 const { default: axios } = require("axios");
 const { MAX_AVATAR_BYTES, ALLOWED_MIME } = require("../staticValues");
 const { fileTypeFromBuffer } = require("file-type");
 const { randomFileName } = require("../helper");
+const MessageFile = require("../../models/MessageFile");
 
 const fileUploader = multer({
   storage: multer.diskStorage({
@@ -157,7 +158,8 @@ async function uploadFile(
   uploader_ip = null,
   user_agent = null,
   user_id = null,
-  recordType = "chat"
+  recordType = "chat",
+  message = null
 ) {
   if (!file || !file.path) throw new Error("Missing file");
 
@@ -325,10 +327,25 @@ async function uploadFile(
     const finalMime = mime || mimeTypes.lookup(outputExt) || null;
     const { size: finalSize } = await fs.stat(finalPath);
 
+    let fileUpload = { id: null };
+
     if (recordType === "chat") {
+      fileUpload = await MessageFile.create({
+        chat_id: message.chat_id,
+        message_id: message.id,
+        sender_id: user_id,
+        name: filename,
+        folders: folder,
+        size: finalSize, // bytes
+        file_type: outputExt, // helpful for querying
+        mime_type: finalMime,
+        user_id,
+        uploader_ip,
+        user_agent,
+      });
     } else {
       // Persist upload record (FIXED FIELDS)
-      const fileUpload = await FileUpload.create({
+      fileUpload = await FileUpload.create({
         name: filename,
         folders: folder,
         size: finalSize, // bytes
@@ -381,6 +398,11 @@ async function deleteFile(fileName, folder, id = null, recordType = "chat") {
 
     if (id) {
       if (recordType === "chat") {
+        await MessageFile.destroy({
+          where: {
+            id: id,
+          },
+        });
       } else {
         await FileUpload.destroy({
           where: {

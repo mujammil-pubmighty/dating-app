@@ -307,19 +307,192 @@ router.post("/profile/settings", userController.updateUserSettings);
  */
 router.post("/profile/change-password", userController.changePassword);
 
-//chatting between user1 & user2
+
+/**
+ * POST /chats/:chatId/send-message
+ * ------------------------------------------------------------
+ * Sends a new message in an existing chat.
+ *
+ * Security & Authorization:
+ * - Requires a valid authenticated session.
+ * - The authenticated user must be a participant of :chatId.
+ * - Server must reject sending if the chat is blocked for either side.
+ *
+ * Payload & Uploads:
+ * - Accepts multipart/form-data.
+ * - Text can be sent along with optional media files.
+ * - Uses `fileUploader.array("media", 10)`:
+ *   - Field name: "media"
+ *   - Max files: 10
+ *   - File validation must enforce allowed mime types + max file size.
+ */
 router.post(
-  "/chats/:chatId/messages",
-  fileUploader.single("file"),
+  "/chats/:chatId/send-message",
+  fileUploader.array("media", 10),
   chatController.sendMessage
 );
+
+/**
+ * GET /chats/:chatId/messages
+ * ------------------------------------------------------------
+ * Fetches chat messages using OFFSET-based pagination.
+ *
+ * Security & Authorization:
+ * - Requires a valid authenticated session.
+ * - The authenticated user must be a participant of :chatId.
+ *
+ * Query Params:
+ * - page (default: 1)
+ * - limit (default: 50, recommended hard cap)
+ *
+ * Behavior:
+ * - Returns messages for the given chat only.
+ * - Excludes deleted messages from normal view.
+ * - Returns messages in chronological order for the requested page.
+ */
 router.get("/chats/:chatId/messages", chatController.getChatMessages);
+
+
+/**
+ * GET /chats/:chatId/messages/cursor
+ * ------------------------------------------------------------
+ * Fetches chat messages using CURSOR-based pagination (recommended for scale).
+ *
+ * Security & Authorization:
+ * - Requires a valid authenticated session.
+ * - The authenticated user must be a participant of :chatId.
+ *
+ * Query Params:
+ * - cursor (optional): message.id of the last item from the previous page
+ * - limit (default: 30–50, hard cap recommended)
+ *
+ */
+router.get("/chats/:chatId/messages/cursor", chatController.getChatMessagesCursor);
+
+/**
+ * POST /chats/:chatId/messages/:messageId/delete
+ * ------------------------------------------------------------
+ * Deletes (unsends) a message.
+ *
+ * Security & Authorization:
+ * - Requires a valid authenticated session.
+ * - Only the original sender of :messageId may delete it.
+ * - The message must belong to :chatId (server must enforce both).
+ *
+ * Behavior:
+ * - Soft-deletes the message:
+ *   - status set to "deleted"
+ *   - message text replaced with "This message was deleted"
+ * - Removes/ignores media and reply previews for deleted messages.
+ * - Operation is idempotent (deleting an already deleted message succeeds).
+*/
+router.post("/chats/:chatId/messages/:messageId/delete", chatController.deleteMessage);
+
+/**
+ * GET /chats
+ * ------------------------------------------------------------
+ * Fetches the authenticated user's chat list (inbox).
+ *
+ * Security & Authorization:
+ * - Requires a valid authenticated session.
+ * - Returns only chats visible to the user (not deleted for that user).
+ *
+ * Query Params:
+ * - page (default: 1)
+ * - limit (default: 20, hard cap recommended)
+ *
+ * Ordering:
+ * - Pinned chats first (per-user pin state).
+ * - Then by last activity (updated_at / last_message_time).
+ *
+ * Response includes:
+ * - The other participant's safe profile subset (no PII like email/phone).
+ * - Last non-deleted message summary.
+ * - Unread message count for the current user.
+*/
 router.get("/chats", chatController.getUserChats);
-router.get("/messages/:messageId", chatController.deleteMessage);
+
+/**
+ * POST /chats/pin
+ * ------------------------------------------------------------
+ * Pins or unpins one or more chats for the current user.
+ *
+ * Security & Authorization:
+ * - Requires a valid authenticated session.
+ * - User must be a participant of each chat in chat_ids.
+ *
+ * Payload:
+ * - chat_ids: number[] (non-empty)
+ * - is_pin: boolean (true = pin, false = unpin)
+ *
+ * Behavior:
+ * - Updates per-user pin state:
+ *   - is_pin_p1 or is_pin_p2 depending on participant side.
+ * - Operation is idempotent (pinning already pinned chats is safe).
+ */
 router.post("/chats/pin", chatController.pinChats);
+/**
+ * POST /chats/:chatId/block
+ * ------------------------------------------------------------
+ * Blocks or unblocks a chat for the current user.
+ *
+ * Security & Authorization:
+ * - Requires a valid authenticated session.
+ * - The authenticated user must be a participant of :chatId.
+ *
+ * Payload:
+ * - action: "block" | "unblock" (optional, default: "block")
+ *
+ * Behavior:
+ * - Blocking is user-scoped:
+ *   - Updates chat_status_p1 or chat_status_p2 for the current user only.
+ * - Operation is idempotent:
+ *   - Blocking an already blocked chat succeeds.
+ *   - Unblocking an already active chat succeeds.
+*/
 router.post("/chats/:chatId/block", chatController.blockChat);
-router.post("/chats/:chatId/read", chatController.markChatMessagesRead);
-router.post("/chats/delete", chatController.deleteChat);
+/**
+ * POST /chats/:chatId/delete
+ * ------------------------------------------------------------
+ * Deletes a chat for the current user only (delete-for-me).
+ *
+ * Security & Authorization:
+ * - Requires a valid authenticated session.
+ * - The authenticated user must be a participant of :chatId.
+ *
+ * Behavior:
+ * - Deletes chat visibility only for the current user:
+ *   - Sets chat_status_p1 or chat_status_p2 to "deleted"
+ * - Also clears per-user state:
+ *   - unpins the chat for the user
+ *   - resets unread count for the user
+ * - Operation is idempotent.
+*/
+router.post("/chats/:chatId/delete", chatController.deleteChat);
+/**
+ * POST /chats/:chatId/mark-as-read
+ * ------------------------------------------------------------
+ * Marks messages in a chat as read for the current user.
+ *
+ * Security & Authorization:
+ * - Requires a valid authenticated session.
+ * - The authenticated user must be a participant of :chatId.
+ * - Updates must be scoped to the given chat_id (server-enforced).
+ *
+ * Payload:
+ * - lastMessageId (optional):
+ *   - If provided, only messages with id <= lastMessageId are marked read.
+ *   - Server should validate lastMessageId belongs to this chat (recommended).
+ *
+ * Behavior:
+ * - Updates unread messages where:
+ *   - chat_id = :chatId
+ *   - receiver_id = current user
+ *   - is_read = false
+ *   - status != "deleted"
+ * - Updates stored unread count on chat for the current user.
+ */
+router.post("/chats/:chatId/mark-as-read", chatController.markChatMessagesRead);
 
 //ads view
 router.get("/ads/status", adsController.getAdStatus);

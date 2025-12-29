@@ -80,11 +80,15 @@ const Chat = sequelize.define(
     updatedAt: "updated_at",
 
     indexes: [
-      { fields: ["participant_1_id"] },
-      { fields: ["participant_2_id"] },
-      { fields: ["last_message_time"] },
-      { fields: ["chat_status_p1"] },
-      { fields: ["chat_status_p2"] },
+      { 
+        name:"idx_unique_chat_participant_1_and_2",
+        fields: ["participant_1_id", "participant_2_id"],
+        unique:true
+       },
+      { 
+        name:"idx_participant_2_status_is_pin_p2",
+        fields: ["participant_2_id", "chat_status_p2", "is_pin_p2"],
+       },
     ],
   }
 );

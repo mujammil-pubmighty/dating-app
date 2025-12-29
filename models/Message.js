@@ -67,6 +67,16 @@ const Message = sequelize.define(
     tableName: "pb_messages",
     timestamps: true,
     underscored: true,
+    indexes: [
+      {
+        name: "idx_messages_chat_id_id",
+        fields: ["chat_id", "id"],
+      },
+      {
+        name: "idx_messages_chat_receiver_read",
+        fields: ["chat_id", "receiver_id", "is_read"],
+      },
+    ],
   }
 );
 

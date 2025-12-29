@@ -18,13 +18,20 @@ async function run() {
     await set("forgot_otp_time_min", 10);
     await set("default_per_page_packages", 10);
     await set("default_total_page_packages", 10);
-    await set("cost_per_message", 10);
     await set("max_pinned_chats", 10);
     await set("google_client_id", "12345678");
 
     await set("total_maxpage_for_feed", 10);
     await set("default_per_page_feed", 10);
     await set("max_files_per_user", 5);
+
+    await set("cost_per_message", 10);
+    await set("max_chat_image_mb", 5);
+    await set("max_chat_audio_mb", 10);
+    await set("max_chat_video_mb", 20);
+    await set("max_chat_file_mb", 10);
+    await set("max_chat_files_per_message", 1);
+    await set("max_pinned_chats", 10);
 
     console.log("Options inserted/verified");
     process.exit(0);

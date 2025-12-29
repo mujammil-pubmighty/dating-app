@@ -155,7 +155,7 @@ function maskEmail(email) {
     return `${name}@**`;
   }
 
-  const visible = local.slice(0, 2);
+  const visible = name.slice(0, 2);
   return `${visible}***@${domain}`;
 }
 
@@ -228,6 +228,29 @@ const parseInterests = (stored) => {
     .filter(Boolean);
 };
 
+const sizeLimitBytes = (mb) => Math.max(0, Number(mb) || 0) * 1024 * 1024;
+
+const normalizeFiles = (req) => {
+  if (Array.isArray(req.files) && req.files.length) return req.files;
+  if (req.file) return [req.file];
+  return [];
+};
+
+const safeTrim = (v) => {
+  if (v === null || v === undefined) return null;
+
+  const s = String(v).trim();
+  return s.length ? s : null;
+};
+
+const toNullableInt = (v) => {
+  if (v === undefined || v === null) return null;
+  const s = String(v).trim();
+  if (!s) return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+};
+
 module.exports = {
   getRealIp,
   getOption,
@@ -243,4 +266,8 @@ module.exports = {
   maskEmail,
   normalizeInterests,
   parseInterests,
+  sizeLimitBytes,
+  normalizeFiles,
+  safeTrim,
+  toNullableInt,
 };

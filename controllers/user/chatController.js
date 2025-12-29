@@ -1,133 +1,1037 @@
 const Joi = require("joi");
-const path = require("path");
 const Message = require("../../models/Message");
 const Chat = require("../../models/Chat");
 const Sequelize = require("sequelize");
 const { Op } = require("sequelize");
 const User = require("../../models/User");
-const MessageFile = require("../../models/MessageFile");
 const CoinSpentTransaction = require("../../models/CoinSpentTransaction");
 const { generateBotReplyForChat } = require("../../utils/helpers/aiHelper");
 const {
   getOption,
   typingTime,
+  normalizeFiles,
+  safeTrim,
+  toNullableInt,
+  sizeLimitBytes,
+  getRealIp,
 } = require("../../utils/helper");
 const {
   verifyFileType, //changes
   uploadFile,
   cleanupTempFiles,
+  deleteFile,
 } = require("../../utils/helpers/fileUpload");
-const { moveUploadedFile } = require("../../utils/helpers/mediaHelper");
 const { isUserSessionValid } = require("../../utils/helpers/authHelper");
+const sequelize = require("../../config/db");
+const { fallbackMessages } = require("../../utils/staticValues");
+const MessageFile = require("../../models/MessageFile");
 
-const { compressImage } = require("../../utils/helpers/imageCompressor");
+/**
+ * Helper function to cleanup uploaded files when transaction fails
+ * @param {Array} uploadedFiles - Array of uploaded file objects
+ * @param {Number} userId - User ID for record deletion
+ */
+async function cleanupUploadedFiles(uploadedFiles, userId) {
+  if (!uploadedFiles || uploadedFiles.length === 0) return;
 
-async function getChatMessages(req, res) {
-  const transaction = await Message.sequelize.transaction();
+  for (const uf of uploadedFiles) {
+    try {
+      // Delete file from filesystem and database record
+      await deleteFile(
+        uf.fileName, // file name
+        uf.folder, // folder path
+        uf.id, // user id
+        "chat" // record type
+      );
+    } catch (delErr) {
+      console.error(
+        `[cleanupUploadedFiles] Failed to delete file ${uf.storedName}:`,
+        delErr
+      );
+    }
+  }
+}
 
-  try {
-    const schema = Joi.object({
-      chatId: Joi.number().integer().required(),
+async function sendMessage(req, res) {
+  // 1) Validate params/body
+  const paramsSchema = Joi.object({
+    chatId: Joi.number().integer().required(),
+  });
+
+  const { error: pErr, value: pVal } = paramsSchema.validate(
+    { chatId: req.params.chatId },
+    { abortEarly: true }
+  );
+
+  if (pErr) {
+    return res
+      .status(400)
+      .json({ success: false, message: pErr.details[0].message });
+  }
+
+  const bodySchema = Joi.object({
+    message: Joi.string().allow("", null).optional(),
+    replyToMessageId: Joi.alternatives()
+      .try(Joi.number().integer(), Joi.string().trim().allow(""))
+      .optional()
+      .allow(null),
+  }).unknown(true);
+
+  const { error: bErr, value: bVal } = bodySchema.validate(req.body || {}, {
+    abortEarly: true,
+    stripUnknown: true,
+  });
+
+  if (bErr) {
+    const incomingFiles = normalizeFiles(req);
+    await cleanupTempFiles(incomingFiles);
+    return res
+      .status(400)
+      .json({ success: false, message: bErr.details[0].message });
+  }
+
+  const chatId = Number(pVal.chatId);
+  const captionOrText = safeTrim(bVal.message);
+  let replyToMessageId = toNullableInt(bVal.replyToMessageId);
+
+  const incomingFiles = normalizeFiles(req);
+
+  // Must have at least text OR file(s)
+  if (!captionOrText && incomingFiles.length === 0) {
+    await cleanupTempFiles(incomingFiles);
+    return res.status(400).json({
+      success: false,
+      message: "Either message text or file(s) are required",
     });
+  }
 
-    const { error } = schema.validate(req.params, { convert: true });
-    if (error) {
-      await transaction.rollback();
+  // 2) Session (mandatory)
+  const sessionResult = await isUserSessionValid(req);
+  if (!sessionResult.success) {
+    await cleanupTempFiles(incomingFiles);
+    return res.status(401).json(sessionResult);
+  }
+  const userId = Number(sessionResult.data);
+
+  // 3) Get options (limits + enable/disable by 0)
+  const [
+    maxImageMBOpt,
+    maxAudioMBOpt,
+    maxVideoMBOpt,
+    maxFileMBOpt,
+    maxFilesPerMessageOpt,
+    costPerMessageOpt,
+  ] = await Promise.all([
+    getOption("max_chat_image_mb", 5),
+    getOption("max_chat_audio_mb", 10),
+    getOption("max_chat_video_mb", 20),
+    getOption("max_chat_file_mb", 10),
+    getOption("max_chat_files_per_message", 1),
+    getOption("cost_per_message", 10),
+  ]);
+
+  const maxImageMB = parseInt(maxImageMBOpt ?? 0, 10);
+  const maxAudioMB = parseInt(maxAudioMBOpt ?? 0, 10);
+  const maxVideoMB = parseInt(maxVideoMBOpt ?? 0, 10);
+  const maxFileMB = parseInt(maxFileMBOpt ?? 0, 10);
+
+  let maxFilesPerMessage = parseInt(maxFilesPerMessageOpt ?? 0, 10);
+  if (Number.isNaN(maxFilesPerMessage) || maxFilesPerMessage < 0)
+    maxFilesPerMessage = 0;
+
+  let messageCost = parseInt(costPerMessageOpt ?? 0, 10);
+  if (Number.isNaN(messageCost) || messageCost < 0) messageCost = 0;
+
+  // Reject if files disabled or too many
+  if (incomingFiles.length > 0) {
+    if (maxFilesPerMessage === 0) {
+      await cleanupTempFiles(incomingFiles);
       return res.status(400).json({
         success: false,
-        message: error.details[0].message,
+        message: "File sending is disabled.",
       });
     }
 
-    const chatId = Number(req.params.chatId);
-    const page = Number(req.query.page || 1);
-    const limit = Number(req.query.limit || 50);
+    if (incomingFiles.length > maxFilesPerMessage) {
+      await cleanupTempFiles(incomingFiles);
+      return res.status(400).json({
+        success: false,
+        message: `Too many files. Max ${maxFilesPerMessage} allowed.`,
+      });
+    }
+  }
+
+  // 4) Validate all files BEFORE transaction (fast-fail)
+  const filePlans = [];
+  try {
+    for (const f of incomingFiles) {
+      const mt = String(f.mimetype || "").toLowerCase();
+
+      let kind = "file";
+      if (mt.startsWith("image/")) kind = "image";
+      else if (mt.startsWith("audio/")) kind = "audio";
+      else if (mt.startsWith("video/")) kind = "video";
+
+      // Check if disabled
+      if (kind === "image" && maxImageMB <= 0)
+        throw Object.assign(new Error("Images are disabled"), {
+          statusCode: 400,
+          code: "IMAGE_DISABLED",
+        });
+      if (kind === "audio" && maxAudioMB <= 0)
+        throw Object.assign(new Error("Audio is disabled"), {
+          statusCode: 400,
+          code: "AUDIO_DISABLED",
+        });
+      if (kind === "video" && maxVideoMB <= 0)
+        throw Object.assign(new Error("Videos are disabled"), {
+          statusCode: 400,
+          code: "VIDEO_DISABLED",
+        });
+      if (kind === "file" && maxFileMB <= 0)
+        throw Object.assign(new Error("Files are disabled"), {
+          statusCode: 400,
+          code: "FILE_DISABLED",
+        });
+
+      // Size limit
+      const maxMB =
+        kind === "image"
+          ? maxImageMB
+          : kind === "audio"
+          ? maxAudioMB
+          : kind === "video"
+          ? maxVideoMB
+          : maxFileMB;
+
+      if (Number(f.size || 0) > sizeLimitBytes(maxMB)) {
+        throw Object.assign(new Error(`${kind} too large (max ${maxMB}MB)`), {
+          statusCode: 400,
+          code: "FILE_TOO_LARGE",
+        });
+      }
+
+      // Magic-byte verification
+      const allowed =
+        kind === "image"
+          ? [
+              "image/png",
+              "image/jpeg",
+              "image/webp",
+              "image/heic",
+              "image/heif",
+              "image/jpg",
+            ]
+          : kind === "audio"
+          ? [
+              "audio/mpeg",
+              "audio/mp3",
+              "audio/mp4",
+              "audio/aac",
+              "audio/ogg",
+              "audio/webm",
+              "audio/wav",
+              "audio/weba",
+              "video/webm",
+            ]
+          : kind === "video"
+          ? [
+              "video/mp4",
+              "video/quicktime",
+              "video/webm",
+              "video/3gpp",
+              "video/x-matroska",
+              "video/mkv",
+              "video/avi",
+            ]
+          : [
+              "application/pdf",
+              "application/zip",
+              "application/x-zip-compressed",
+              "application/msword",
+              "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ];
+
+      const detect = await verifyFileType(f, allowed);
+
+      if (!detect || !detect.ok) {
+        throw Object.assign(new Error(`Invalid ${kind} type`), {
+          statusCode: 400,
+          code: "INVALID_FILE_TYPE",
+        });
+      }
+
+      filePlans.push({
+        file: f,
+        kind,
+        detected: detect,
+      });
+    }
+  } catch (preErr) {
+    await cleanupTempFiles(incomingFiles);
+    return res.status(preErr.statusCode || 400).json({
+      success: false,
+      message: preErr.message || "Invalid upload",
+    });
+  }
+
+  // 5) Main transaction: Create message FIRST, then upload files
+  let createdMessage = null;
+  let receiverId = null;
+  let isBotReceiver = false;
+  const uploadedFiles = []; // Track uploaded files for cleanup on failure
+
+  try {
+    const result = await sequelize.transaction(async (t) => {
+      // Lock chat
+      const chat = await Chat.findByPk(chatId, {
+        transaction: t,
+        lock: t.LOCK.UPDATE,
+      });
+
+      if (!chat) {
+        const e = new Error("Chat not found");
+        e.statusCode = 404;
+        throw e;
+      }
+
+      const isUserP1 = chat.participant_1_id === userId;
+      const isUserP2 = chat.participant_2_id === userId;
+
+      if (!isUserP1 && !isUserP2) {
+        const e = new Error("Not in this chat");
+        e.statusCode = 403;
+        throw e;
+      }
+
+      const myStatus = isUserP1 ? chat.chat_status_p1 : chat.chat_status_p2;
+      if (myStatus === "blocked") {
+        const e = new Error(
+          "You have blocked this user. Unblock to send messages."
+        );
+        e.statusCode = 403;
+        e.code = "YOU_BLOCKED_USER";
+        throw e;
+      }
+
+      receiverId = isUserP1 ? chat.participant_2_id : chat.participant_1_id;
+
+      // Mark incoming messages as read for this user
+      await Message.update(
+        { is_read: true, read_at: new Date(), status: "read" },
+        {
+          where: { chat_id: chatId, receiver_id: userId, is_read: false },
+          transaction: t,
+        }
+      );
+
+      // Reset unread count for sender
+      if (isUserP1) chat.unread_count_p1 = 0;
+      else chat.unread_count_p2 = 0;
+
+      // Lock sender for coins
+      const sender = await User.findByPk(userId, {
+        transaction: t,
+        lock: t.LOCK.UPDATE,
+      });
+
+      if (!sender) {
+        const e = new Error("Sender not found");
+        e.statusCode = 404;
+        throw e;
+      }
+
+      // Check coins ONCE per message
+      if (messageCost > 0 && Number(sender.coins || 0) < messageCost) {
+        const e = new Error("Not enough coins");
+        e.statusCode = 400;
+        e.code = "INSUFFICIENT_COINS";
+        throw e;
+      }
+
+      // Validate reply
+      if (replyToMessageId) {
+        const repliedMessage = await Message.findOne({
+          where: { id: replyToMessageId, chat_id: chat.id },
+          transaction: t,
+        });
+        if (!repliedMessage) replyToMessageId = null;
+      }
+
+      // Determine message type
+      let messageType = "text";
+      if (filePlans.length > 0) {
+        const hasMultipleTypes =
+          new Set(filePlans.map((fp) => fp.kind)).size > 1;
+
+        if (hasMultipleTypes || (captionOrText && filePlans.length > 0)) {
+          messageType = "multimedia";
+        } else {
+          // Single type: use that kind
+          messageType = filePlans[0].kind;
+        }
+      }
+
+      // ========================================
+      // CREATE MESSAGE FIRST (before file upload)
+      // ========================================
+      createdMessage = await Message.create(
+        {
+          chat_id: chat.id,
+          sender_id: userId,
+          receiver_id: receiverId,
+          message: captionOrText || null,
+          message_type: messageType,
+          reply_id: replyToMessageId || null,
+          sender_type: "real",
+          is_read: false,
+          read_at: null,
+          status: "sent",
+          is_paid: messageCost > 0,
+          price: messageCost > 0 ? messageCost : 0,
+        },
+        { transaction: t }
+      );
+
+      // ========================================
+      // NOW UPLOAD FILES (with message ID)
+      // ========================================
+      if (filePlans.length > 0) {
+        const uploader_ip = getRealIp(req);
+        const user_agent = String(req.headers["user-agent"] || "").slice(
+          0,
+          300
+        );
+
+        for (const plan of filePlans) {
+          const { file, kind, detected } = plan;
+
+          const destFolder =
+            kind === "image"
+              ? `uploads/chat/images/${userId}`
+              : kind === "audio"
+              ? `uploads/chat/audios/${userId}`
+              : kind === "video"
+              ? `uploads/chat/videos/${userId}`
+              : `uploads/chat/files/${userId}`;
+
+          // Upload file (with message reference for tracking)
+          const storedFile = await uploadFile(
+            file.path,
+            destFolder,
+            detected.ext,
+            uploader_ip,
+            user_agent,
+            userId,
+            "chat",
+            createdMessage // Pass message object for relation
+          );
+
+          // Track uploaded file for cleanup on failure
+          uploadedFiles.push({
+            filename: storedFile.filename,
+            folder: storedFile.folder,
+            id: storedFile.id,
+            userId,
+          });
+
+          // Clean up temp file immediately after successful upload
+          await cleanupTempFiles([file]);
+        }
+      }
+
+      // Deduct coins ONCE
+      if (messageCost > 0) {
+        await sender.update(
+          { coins: Number(sender.coins || 0) - messageCost },
+          { transaction: t }
+        );
+
+        await CoinSpentTransaction.create(
+          {
+            user_id: userId,
+            coins: messageCost,
+            spent_on: "message",
+            message_id: createdMessage.id,
+            status: "completed",
+          },
+          { transaction: t }
+        );
+      }
+
+      // Update chat: increment unread by 1 (ONE message)
+      const chatUpdate = {
+        last_message_id: createdMessage.id,
+        last_message_time: new Date(),
+      };
+
+      if (receiverId === chat.participant_1_id) {
+        chatUpdate.unread_count_p1 = (chat.unread_count_p1 || 0) + 1;
+      } else {
+        chatUpdate.unread_count_p2 = (chat.unread_count_p2 || 0) + 1;
+      }
+
+      await chat.update(chatUpdate, { transaction: t });
+
+      // Check if receiver is bot
+      const freshReceiver = await User.findByPk(receiverId, {
+        transaction: t,
+      });
+      isBotReceiver = !!(freshReceiver && freshReceiver.type === "bot");
+
+      return {
+        message: createdMessage,
+        files: uploadedFiles,
+      };
+    });
+
+    // Transaction committed successfully
+    // Cleanup any remaining temp files
+    await cleanupTempFiles(incomingFiles);
+
+    // If non-bot, respond immediately
+    if (!isBotReceiver) {
+      return res.json({
+        success: true,
+        message: "Message sent",
+        data: {
+          message: result.message,
+          files: result.files,
+          bot_message: null,
+          has_media: filePlans.length > 0,
+          has_caption: !!captionOrText,
+        },
+      });
+    }
+
+    // BOT REPLY (after successful commit)
+    // TODO: Remove this in production
+    const delayMs = 3000;
+    await new Promise((r) => setTimeout(r, delayMs));
+
+    let botReplyText = null;
+    try {
+      botReplyText = await generateBotReplyForChat(
+        chatId,
+        captionOrText || "sent a file"
+      );
+    } catch (aiErr) {
+      console.error("[sendMessage] AI bot reply error:", aiErr);
+    }
+
+    if (!safeTrim(botReplyText)) {
+      botReplyText =
+        fallbackMessages[Math.floor(Math.random() * fallbackMessages.length)];
+    }
+
+    // Separate transaction for bot save
+    let botSaved = null;
+    try {
+      botSaved = await sequelize.transaction(async (t2) => {
+        const botMessageSaved = await Message.create(
+          {
+            chat_id: chatId,
+            sender_id: receiverId,
+            receiver_id: userId,
+            message: botReplyText,
+            reply_id: createdMessage.id,
+            message_type: "text",
+            sender_type: "bot",
+            is_read: false,
+            read_at: null,
+            status: "sent",
+            is_paid: false,
+            price: 0,
+          },
+          { transaction: t2 }
+        );
+
+        // Lock chat for update
+        const chatForUpdate = await Chat.findByPk(chatId, {
+          transaction: t2,
+          lock: t2.LOCK.UPDATE,
+        });
+
+        const botUpdate = {
+          last_message_id: botMessageSaved.id,
+          last_message_time: new Date(),
+        };
+
+        if (userId === chatForUpdate.participant_1_id) {
+          botUpdate.unread_count_p1 = (chatForUpdate.unread_count_p1 || 0) + 1;
+        } else {
+          botUpdate.unread_count_p2 = (chatForUpdate.unread_count_p2 || 0) + 1;
+        }
+
+        await chatForUpdate.update(botUpdate, { transaction: t2 });
+
+        return botMessageSaved;
+      });
+
+      return res.json({
+        success: true,
+        message: "Message sent (bot replied)",
+        data: {
+          message: result.message,
+          files: result.files,
+          bot_message: botSaved,
+          has_media: filePlans.length > 0,
+          has_caption: !!captionOrText,
+        },
+      });
+    } catch (botErr) {
+      console.error("Error during bot sendMessage:", botErr);
+      return res.json({
+        success: true,
+        message: "Message sent.",
+        data: {
+          message: result.message,
+          files: result.files,
+          bot_message: null,
+          has_media: filePlans.length > 0,
+          has_caption: !!captionOrText,
+        },
+      });
+    }
+  } catch (err) {
+    console.error("Error during sendMessage:", err);
+
+    // Cleanup temp files
+    await cleanupTempFiles(incomingFiles);
+
+    // DELETE uploaded files from filesystem since transaction rolled back
+    await cleanupUploadedFiles(uploadedFiles);
+
+    const status = err.statusCode || 500;
+    return res.status(status).json({
+      success: false,
+      code: err.code || (status === 500 ? "SERVER_ERROR" : undefined),
+      message:
+        status === 500 ? "Server error" : err.message || "Request failed",
+    });
+  }
+}
+
+async function getChatMessages(req, res) {
+  try {
+    // 1) Validate params + query
+    const paramsSchema = Joi.object({
+      chatId: Joi.number().integer().positive().required(),
+    });
+
+    const { error: pErr, value: pVal } = paramsSchema.validate(req.params, {
+      abortEarly: true,
+      convert: true,
+      stripUnknown: true,
+    });
+    if (pErr) {
+      return res
+        .status(400)
+        .json({ success: false, message: pErr.details[0].message });
+    }
+
+    const querySchema = Joi.object({
+      page: Joi.number().integer().min(1).default(1),
+      limit: Joi.number().integer().min(1).max(50).default(50), // hard cap for safety
+      includeTotal: Joi.boolean()
+        .truthy("1", "true")
+        .falsy("0", "false")
+        .default(false),
+    });
+
+    const { error: qErr, value: qVal } = querySchema.validate(req.query, {
+      abortEarly: true,
+      convert: true,
+      stripUnknown: true,
+    });
+    if (qErr) {
+      return res
+        .status(400)
+        .json({ success: false, message: qErr.details[0].message });
+    }
+
+    const chatId = Number(pVal.chatId);
+    const page = Number(qVal.page);
+    const limit = Number(qVal.limit);
+    const includeTotal = Boolean(qVal.includeTotal);
     const offset = (page - 1) * limit;
 
+    // 2) Validate session
     const sessionResult = await isUserSessionValid(req);
     if (!sessionResult.success) {
-      await transaction.rollback();
       return res.status(401).json(sessionResult);
     }
     const userId = Number(sessionResult.data);
 
-    // lock chat row to safely update unread_count_p1/p2
+    // 3) Fetch chat (no lock) and authorize
     const chat = await Chat.findByPk(chatId, {
-      transaction,
-      lock: transaction.LOCK.UPDATE,
+      attributes: [
+        "id",
+        "participant_1_id",
+        "participant_2_id",
+        "unread_count_p1",
+        "unread_count_p2",
+      ],
     });
 
     if (!chat) {
-      await transaction.rollback();
       return res
         .status(404)
         .json({ success: false, message: "Chat not found" });
     }
 
-    if (chat.participant_1_id !== userId && chat.participant_2_id !== userId) {
-      await transaction.rollback();
+    const isP1 = chat.participant_1_id === userId;
+    const isP2 = chat.participant_2_id === userId;
+    if (!isP1 && !isP2) {
       return res.status(403).json({
         success: false,
         message: "You are not allowed to view this chat",
       });
     }
 
-    // Fetch messages
-    const { count, rows } = await Message.findAndCountAll({
-      where: {
-        chat_id: chatId,
-        status: { [Op.ne]: "deleted" },
-      },
-      order: [["id", "ASC"]],
+    // 4) Fetch messages (no transaction needed)
+    // Use DESC for performance (newest first), then reverse for client if needed.
+    const where = {
+      chat_id: chatId,
+    };
+
+    const messages = await Message.findAll({
+      where,
+      order: [["id", "DESC"]],
       limit,
       offset,
-      transaction,
-    });
-    const [updatedCount] = await Message.update(
-      {
-        is_read: true,
-        read_at: new Date(),
-        status: "read",
-      },
-      {
-        where: {
-          chat_id: chatId,
-          receiver_id: userId,
-          is_read: false,
-          status: { [Op.ne]: "deleted" },
+      attributes: [
+        "id",
+        "chat_id",
+        "sender_id",
+        "receiver_id",
+        "message",
+        "message_type",
+        "created_at",
+        "is_read",
+        "read_at",
+        "status",
+        "reply_to_message_id",
+      ],
+      include: [
+        {
+          model: Message,
+          as: "reply_to",
+          attributes: [
+            "id",
+            "message",
+            "message_type",
+            "sender_id",
+            "receiver_id",
+            "status",
+          ],
         },
-        transaction,
-      }
-    );
-    if (chat.participant_1_id === userId) {
-      chat.unread_count_p1 = 0;
-    } else {
-      chat.unread_count_p2 = 0;
+        {
+          model: MessageFile,
+          as: "messageFiles",
+          attributes: [
+            "id",
+            "message_id",
+            "name",
+            "folders",
+            "size",
+            "file_type",
+            "mime_type",
+          ],
+        },
+      ],
+    });
+
+    // Reverse to ASC so UI shows old -> new on that page
+    messages.reverse();
+
+    // Optional: count only when asked (saves DB for scale)
+    let total = null;
+    let totalPages = null;
+    if (includeTotal) {
+      total = await Message.count({ where });
+      totalPages = Math.ceil(total / limit);
     }
-    await chat.save({ transaction });
 
-    await transaction.commit();
+    // 5) Mark as read + reset unread counters in a SHORT transaction
+    // Only update rows that are actually unread and intended for this user.
+    const t = await sequelize.transaction();
+    try {
+      // Lock chat row only for unread reset (short duration)
+      const lockedChat = await Chat.findByPk(chatId, {
+        transaction: t,
+        lock: t.LOCK.UPDATE,
+        attributes: [
+          "id",
+          "participant_1_id",
+          "participant_2_id",
+          "unread_count_p1",
+          "unread_count_p2",
+        ],
+      });
 
-    return res.json({
-      success: true,
-      message: "Messages fetched successfully",
-      data: {
-        messages: rows,
-        pagination: {
-          total: count,
-          page,
-          limit,
-          totalPages: Math.ceil(count / limit),
+      if (!lockedChat) {
+        await t.rollback();
+        return res
+          .status(404)
+          .json({ success: false, message: "Chat not found" });
+      }
+
+      const [updatedCount] = await Message.update(
+        {
+          is_read: true,
+          read_at: new Date(),
+          // If you insist on status, keep it minimal:
+          status: "read",
         },
-        read: {
-          updatedCount, // how many became read on open
-          unreadCount: 0,
+        {
+          where: {
+            chat_id: chatId,
+            receiver_id: userId,
+            is_read: false,
+            status: { [Op.ne]: "deleted" },
+          },
+          transaction: t,
+        }
+      );
+
+      if (lockedChat.participant_1_id === userId)
+        lockedChat.unread_count_p1 = 0;
+      if (lockedChat.participant_2_id === userId)
+        lockedChat.unread_count_p2 = 0;
+
+      await lockedChat.save({ transaction: t });
+      await t.commit();
+
+      return res.json({
+        success: true,
+        message: "Messages fetched successfully",
+        data: {
+          messages,
+          pagination: {
+            page,
+            limit,
+            ...(includeTotal ? { total, totalPages } : {}),
+          },
+          read: {
+            updatedCount,
+            unreadCount: 0,
+          },
         },
-      },
-    });
+      });
+    } catch (e) {
+      await t.rollback();
+      throw e;
+    }
   } catch (err) {
     console.error("getChatMessages Error:", err);
-    await transaction.rollback();
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error" });
+  }
+}
+
+async function getChatMessagesCursor(req, res) {
+  try {
+    // 1) Validate params
+    const paramsSchema = Joi.object({
+      chatId: Joi.number().integer().positive().required(),
+    });
+
+    const { error: pErr, value: pVal } = paramsSchema.validate(req.params, {
+      abortEarly: true,
+      convert: true,
+      stripUnknown: true,
+    });
+    if (pErr) {
+      return res.status(400).json({
+        success: false,
+        message: pErr.details[0].message,
+      });
+    }
+
+    // 2) Validate query
+    const querySchema = Joi.object({
+      limit: Joi.number().integer().min(1).max(50).default(30),
+      cursor: Joi.number().integer().positive().optional(), // message.id
+    });
+
+    const { error: qErr, value: qVal } = querySchema.validate(req.query, {
+      abortEarly: true,
+      convert: true,
+      stripUnknown: true,
+    });
+    if (qErr) {
+      return res.status(400).json({
+        success: false,
+        message: qErr.details[0].message,
+      });
+    }
+
+    const chatId = Number(pVal.chatId);
+    const limit = Number(qVal.limit);
+    const cursor = qVal.cursor ? Number(qVal.cursor) : null;
+
+    // 3) Validate session
+    const sessionResult = await isUserSessionValid(req);
+    if (!sessionResult.success) {
+      return res.status(401).json(sessionResult);
+    }
+    const userId = Number(sessionResult.data);
+
+    // 4) Fetch chat + authorize
+    const chat = await Chat.findByPk(chatId, {
+      attributes: [
+        "id",
+        "participant_1_id",
+        "participant_2_id",
+        "unread_count_p1",
+        "unread_count_p2",
+      ],
+    });
+
+    if (!chat) {
+      return res.status(404).json({
+        success: false,
+        message: "Chat not found",
+      });
+    }
+
+    const isP1 = chat.participant_1_id === userId;
+    const isP2 = chat.participant_2_id === userId;
+    if (!isP1 && !isP2) {
+      return res.status(403).json({
+        success: false,
+        message: "You are not allowed to view this chat",
+      });
+    }
+
+    // 5) Build cursor WHERE clause
+    const where = {
+      chat_id: chatId,
+      ...(cursor ? { id: { [Op.lt]: cursor } } : {}), // key part
+    };
+
+    // 6) Fetch messages (DESC for performance)
+    const messages = await Message.findAll({
+      where,
+      order: [["id", "DESC"]],
+      limit,
+      attributes: [
+        "id",
+        "chat_id",
+        "sender_id",
+        "receiver_id",
+        "message",
+        "message_type",
+        "created_at",
+        "is_read",
+        "read_at",
+        "status",
+        "reply_to_message_id",
+      ],
+      include: [
+        {
+          model: Message,
+          as: "reply_to",
+          attributes: [
+            "id",
+            "message",
+            "message_type",
+            "sender_id",
+            "receiver_id",
+            "status",
+          ],
+        },
+        {
+          model: MessageFile,
+          as: "messageFiles",
+          attributes: [
+            "id",
+            "message_id",
+            "name",
+            "folders",
+            "size",
+            "file_type",
+            "mime_type",
+          ],
+        },
+      ],
+    });
+
+    // Old → New for UI
+    messages.reverse();
+
+    // Determine next cursor
+    const nextCursor = messages.length > 0 ? messages[0].id : null;
+
+    // 7) Mark messages as read (short transaction)
+    const t = await sequelize.transaction();
+    try {
+      const lockedChat = await Chat.findByPk(chatId, {
+        transaction: t,
+        lock: t.LOCK.UPDATE,
+        attributes: [
+          "id",
+          "participant_1_id",
+          "participant_2_id",
+          "unread_count_p1",
+          "unread_count_p2",
+        ],
+      });
+
+      if (!lockedChat) {
+        await t.rollback();
+        return res.status(404).json({
+          success: false,
+          message: "Chat not found",
+        });
+      }
+
+      const [updatedCount] = await Message.update(
+        {
+          is_read: true,
+          read_at: new Date(),
+          status: "read",
+        },
+        {
+          where: {
+            chat_id: chatId,
+            receiver_id: userId,
+            is_read: false,
+            status: { [Op.ne]: "deleted" },
+          },
+          transaction: t,
+        }
+      );
+
+      if (lockedChat.participant_1_id === userId)
+        lockedChat.unread_count_p1 = 0;
+      if (lockedChat.participant_2_id === userId)
+        lockedChat.unread_count_p2 = 0;
+
+      await lockedChat.save({ transaction: t });
+      await t.commit();
+
+      return res.json({
+        success: true,
+        message: "Messages fetched successfully",
+        data: {
+          messages,
+          cursor: nextCursor, // client uses this for next request
+          hasMore: messages.length === limit,
+          read: {
+            updatedCount,
+            unreadCount: 0,
+          },
+        },
+      });
+    } catch (e) {
+      await t.rollback();
+      throw e;
+    }
+  } catch (err) {
+    console.error("getChatMessagesCursor Error:", err);
     return res.status(500).json({
       success: false,
       message: "Internal server error",
@@ -135,1018 +1039,126 @@ async function getChatMessages(req, res) {
   }
 }
 
-// async function sendMessage(req, res) {
-//   const t = await Message.sequelize.transaction();
-//   let newMsg = null;
-
-//   try {
-//     //Validate params
-//     const paramsSchema = Joi.object({
-//       chatId: Joi.number().integer().required(),
-//     });
-
-//     const { error: pErr, value: pVal } = paramsSchema.validate(
-//       { chatId: req.params.chatId },
-//       { abortEarly: true }
-//     );
-
-//     if (pErr) {
-//       await t.rollback();
-//       return res
-//         .status(400)
-//         .json({ success: false, message: pErr.details[0].message });
-//     }
-
-//     // Validate body
-//     const bodySchema = Joi.object({
-//       message: Joi.string().allow("", null).optional(),
-//       replyToMessageId: Joi.alternatives()
-//         .try(Joi.number().integer(), Joi.string().trim().allow(""))
-//         .optional()
-//         .allow(null),
-//     }).unknown(true);
-
-//     const { error: bErr, value: bVal } = bodySchema.validate(req.body || {}, {
-//       abortEarly: true,
-//       stripUnknown: true,
-//     });
-
-//     if (bErr) {
-//       await t.rollback();
-//       await cleanupTempFiles([req.file]);
-//       return res
-//         .status(400)
-//         .json({ success: false, message: bErr.details[0].message });
-//     }
-
-//     const chatId = Number(pVal.chatId);
-//     const file = req.file || null;
-
-//     // Normalize message text/caption
-//     const captionOrText = (bVal.message || "").toString().trim();
-
-//     let replyToMessageId = bVal.replyToMessageId;
-//     if (typeof replyToMessageId === "string")
-//       replyToMessageId = replyToMessageId.trim();
-//     if (replyToMessageId === "" || replyToMessageId === undefined)
-//       replyToMessageId = null;
-//     if (replyToMessageId !== null) replyToMessageId = Number(replyToMessageId);
-//     if (replyToMessageId !== null && Number.isNaN(replyToMessageId))
-//       replyToMessageId = null;
-
-//     // Must have at least message OR file
-//     if (!captionOrText && !file) {
-//       await t.rollback();
-//       return res.status(400).json({
-//         success: false,
-//         message: "Either message text or a file is required",
-//       });
-//     }
-
-//     //  Session check
-//     const sessionResult = await isUserSessionValid(req);
-//     if (!sessionResult.success) {
-//       await t.rollback();
-//       await cleanupTempFiles([file]);
-//       return res.status(401).json(sessionResult);
-//     }
-//     const userId = Number(sessionResult.data);
-
-//     const chat = await Chat.findByPk(chatId, {
-//       transaction: t,
-//       lock: t.LOCK.UPDATE,
-//     });
-
-//     if (!chat) {
-//       await t.rollback();
-//       await cleanupTempFiles([file]);
-//       return res
-//         .status(404)
-//         .json({ success: false, message: "Chat not found" });
-//     }
-
-//     const isUserP1 = chat.participant_1_id === userId;
-//     const isUserP2 = chat.participant_2_id === userId;
-
-//     if (!isUserP1 && !isUserP2) {
-//       await t.rollback();
-//       await cleanupTempFiles([file]);
-//       return res
-//         .status(403)
-//         .json({ success: false, message: "Not in this chat" });
-//     }
-
-//     const myStatus = isUserP1 ? chat.chat_status_p1 : chat.chat_status_p2;
-//     if (myStatus === "blocked") {
-//       await t.rollback();
-//       await cleanupTempFiles([file]);
-//       return res.status(403).json({
-//         success: false,
-//         code: "YOU_BLOCKED_USER",
-//         message: "You have blocked this user. Unblock to send messages.",
-//       });
-//     }
-
-//     const receiverId = isUserP1 ? chat.participant_2_id : chat.participant_1_id;
-
-//     //  Mark messages read for this user + reset unread count for this user
-//     await Message.update(
-//       { is_read: true, read_at: new Date(), status: "read" },
-//       {
-//         where: { chat_id: chatId, receiver_id: userId, is_read: false },
-//         transaction: t,
-//       }
-//     );
-
-//     if (isUserP1) chat.unread_count_p1 = 0;
-//     else chat.unread_count_p2 = 0;
-//     await chat.save({ transaction: t });
-
-//     //  Auto-detect finalType
-//     let finalType = "text";
-//     if (file) {
-//       const mt = String(file.mimetype || "").toLowerCase();
-//       if (mt.startsWith("image/")) finalType = "image";
-//       else if (mt.startsWith("audio/")) finalType = "audio";
-//       else if (mt.startsWith("video/")) finalType = "video";
-//       else finalType = "file";
-//     }
-
-//     //  Validate + prepare media
-//     let finalMediaUrl = null;
-
-//     const maxImageMB = parseInt(await getOption("max_chat_image_mb", 20), 10);
-//     const maxAudioMB = parseInt(await getOption("max_chat_audio_mb", 20), 10);
-//     const maxVideoMB = parseInt(await getOption("max_chat_video_mb", 50), 10);
-//     const maxFileMB = parseInt(await getOption("max_chat_file_mb", 20), 10);
-
-//     const sizeLimitBytes = (mb) => Math.max(1, mb) * 1024 * 1024;
-
-//     const ensureFile = () => {
-//       if (!file) {
-//         throw Object.assign(new Error("File is required"), {
-//           code: "FILE_REQUIRED",
-//         });
-//       }
-//     };
-
-//     if (finalType === "image") {
-//       ensureFile();
-//       if (file.size > sizeLimitBytes(maxImageMB)) {
-//         await t.rollback();
-//         await cleanupTempFiles([file]);
-//         return res.status(400).json({
-//           success: false,
-//           message: `Image too large (max ${maxImageMB}MB)`,
-//         });
-//       }
-
-//       const detect = await verifyFileType(file, [
-//         "image/png",
-//         "image/jpeg",
-//         "image/webp",
-//         "image/heic",
-//         "image/heif",
-//         "image/jpg",
-//       ]);
-//       if (!detect || !detect.ok) {
-//         await t.rollback();
-//         await cleanupTempFiles([file]);
-//         return res
-//           .status(400)
-//           .json({ success: false, message: "Invalid image type" });
-//       }
-
-//       const compressed = await compressImage(file.path, "chat");
-//       finalMediaUrl = compressed.filename;
-//       await cleanupTempFiles([file]);
-//     }
-
-//     if (finalType === "audio") {
-//       ensureFile();
-//       if (file.size > sizeLimitBytes(maxAudioMB)) {
-//         await t.rollback();
-//         await cleanupTempFiles([file]);
-//         return res.status(400).json({
-//           success: false,
-//           message: `Audio too large (max ${maxAudioMB}MB)`,
-//         });
-//       }
-
-//       const detect = await verifyFileType(file, [
-//         "audio/mpeg",
-//         "audio/mp3",
-//         "audio/mp4",
-//         "audio/aac",
-//         "audio/ogg",
-//         "audio/webm",
-//         "audio/wav",
-//         "video/webm",
-//         "audio/weba",
-//       ]);
-//       if (!detect || !detect.ok) {
-//         await t.rollback();
-//         await cleanupTempFiles([file]);
-//         return res
-//           .status(400)
-//           .json({ success: false, message: "Invalid audio type" });
-//       }
-
-//       finalMediaUrl = await moveUploadedFile(file, "chat_audio");
-//     }
-
-//     if (finalType === "video") {
-//       ensureFile();
-//       if (file.size > sizeLimitBytes(maxVideoMB)) {
-//         await t.rollback();
-//         await cleanupTempFiles([file]);
-//         return res.status(400).json({
-//           success: false,
-//           message: `Video too large (max ${maxVideoMB}MB)`,
-//         });
-//       }
-
-//       const detect = await verifyFileType(file, [
-//         "video/mp4",
-//         "video/quicktime",
-//         "video/webm",
-//         "video/3gpp",
-//         "video/x-matroska",
-//         "video/mkv",
-//         "video/avi",
-//       ]);
-//       if (!detect || !detect.ok) {
-//         await t.rollback();
-//         await cleanupTempFiles([file]);
-//         return res
-//           .status(400)
-//           .json({ success: false, message: "Invalid video type" });
-//       }
-
-//       finalMediaUrl = await moveUploadedFile(file, "chat_video");
-//     }
-
-//     if (finalType === "file") {
-//       ensureFile();
-//       if (file.size > sizeLimitBytes(maxFileMB)) {
-//         await t.rollback();
-//         await cleanupTempFiles([file]);
-//         return res.status(400).json({
-//           success: false,
-//           message: `File too large (max ${maxFileMB}MB)`,
-//         });
-//       }
-
-//       const detect = await verifyFileType(file, [
-//         "application/pdf",
-//         "application/zip",
-//         "application/x-zip-compressed",
-//         "application/msword",
-//         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-//       ]);
-//       if (!detect || !detect.ok) {
-//         await t.rollback();
-//         await cleanupTempFiles([file]);
-//         return res
-//           .status(400)
-//           .json({ success: false, message: "Invalid file type" });
-//       }
-
-//       finalMediaUrl = await moveUploadedFile(file, "chat_file");
-//     }
-
-//     //  Coins logic
-//     const optionValue = await getOption("cost_per_message", 10);
-//     let messageCost = parseInt(optionValue ?? 0, 10);
-//     if (Number.isNaN(messageCost)) messageCost = 0;
-
-//     const sender = await User.findByPk(userId, {
-//       transaction: t,
-//       lock: t.LOCK.UPDATE,
-//     });
-
-//     if (!sender) {
-//       await t.rollback();
-//       return res
-//         .status(404)
-//         .json({ success: false, message: "Sender not found" });
-//     }
-
-//     if (messageCost > 0 && Number(sender.coins || 0) < messageCost) {
-//       await t.rollback();
-//       return res.status(400).json({
-//         success: false,
-//         code: "INSUFFICIENT_COINS",
-//         message: "Not enough coins",
-//       });
-//     }
-
-//     //  Reply check (optional, real-world friendly)
-//     let repliedMessage = null;
-//     if (replyToMessageId) {
-//       repliedMessage = await Message.findOne({
-//         where: { id: replyToMessageId, chat_id: chat.id },
-//         transaction: t,
-//       });
-//       if (!repliedMessage) replyToMessageId = null; // ignore invalid reply id
-//     }
-
-//     //  Create user message
-//     newMsg = await Message.create(
-//       {
-//         chat_id: chat.id,
-//         sender_id: userId,
-//         receiver_id: receiverId,
-//         message: captionOrText || "",
-
-//         message_type: finalType,
-//         media_url: finalMediaUrl,
-//         reply_id: replyToMessageId || null,
-
-//         sender_type: "real",
-//         is_read: false,
-//         read_at: null,
-//         status: "sent",
-
-//         is_paid: messageCost > 0,
-//         price: messageCost,
-//       },
-//       { transaction: t }
-//     );
-
-//     // Deduct coins + log
-//     if (messageCost > 0) {
-//       await sender.update(
-//         { coins: Number(sender.coins || 0) - messageCost },
-//         { transaction: t }
-//       );
-
-//       await CoinSpentTransaction.create(
-//         {
-//           user_id: userId,
-//           coins: messageCost,
-//           spent_on: "message",
-//           message_id: newMsg.id,
-//           status: "completed",
-//         },
-//         { transaction: t }
-//       );
-//     }
-
-//     // Update chat unread + last message
-//     const chatUpdate = {
-//       last_message_id: newMsg.id,
-//       last_message_time: new Date(),
-//     };
-
-//     if (receiverId === chat.participant_1_id) {
-//       chatUpdate.unread_count_p1 = (chat.unread_count_p1 || 0) + 1;
-//     } else {
-//       chatUpdate.unread_count_p2 = (chat.unread_count_p2 || 0) + 1;
-//     }
-
-//     await chat.update(chatUpdate, { transaction: t });
-
-//     //  Decide if receiver is bot
-//     const freshReceiver = await User.findByPk(receiverId, { transaction: t });
-//     const isBotReceiver = freshReceiver && freshReceiver.type === "bot";
-
-//     if (!isBotReceiver) {
-//       await t.commit();
-//       return res.json({
-//         success: true,
-//         message: "Message sent",
-//         data: {
-//           user_message: newMsg,
-//           bot_message: null,
-//           detected_type: finalType,
-//           has_media: !!finalMediaUrl,
-//           has_caption: !!captionOrText,
-//         },
-//       });
-//     }
-
-//     await t.commit();
-
-//     //  Generate bot reply
-//     const delayMs = 3000;
-//     await new Promise((r) => setTimeout(r, delayMs));
-
-//     const fallbackMessages = [
-//       "Hey! I'm here 🙂",
-//       "I was thinking about you just now.",
-//       "Tell me more, I'm really curious.",
-//       "That sounds interesting, go on 🙂",
-//       "You make this chat more fun!",
-//     ];
-
-//     let botReplyText = null;
-//     try {
-//       botReplyText = await generateBotReplyForChat(
-//         chat.id,
-//         captionOrText || ""
-//       );
-//     } catch (aiErr) {
-//       console.error("[sendMessage] AI bot reply error:", aiErr);
-//     }
-
-//     if (!botReplyText || !botReplyText.toString().trim()) {
-//       botReplyText =
-//         fallbackMessages[Math.floor(Math.random() * fallbackMessages.length)];
-//     }
-
-//     // Save bot message
-//     const t2 = await Message.sequelize.transaction();
-//     try {
-//       const botMessageSaved = await Message.create(
-//         {
-//           chat_id: chat.id,
-//           sender_id: receiverId,
-//           receiver_id: userId,
-//           message: botReplyText,
-//           reply_id: newMsg.id,
-//           message_type: "text",
-//           sender_type: "bot",
-//           is_read: false,
-//           read_at: null,
-//           status: "sent",
-//           is_paid: false,
-//           price: 0,
-//           media_url: null,
-//         },
-//         { transaction: t2 }
-//       );
-
-//       const botUpdate = {
-//         last_message_id: botMessageSaved.id,
-//         last_message_time: new Date(),
-//       };
-
-//       if (userId === chat.participant_1_id) {
-//         botUpdate.unread_count_p1 = Sequelize.literal("unread_count_p1 + 1");
-//       } else {
-//         botUpdate.unread_count_p2 = Sequelize.literal("unread_count_p2 + 1");
-//       }
-
-//       await Chat.update(botUpdate, { where: { id: chat.id }, transaction: t2 });
-//       await t2.commit();
-
-//       return res.json({
-//         success: true,
-//         message: "Message sent (bot replied)",
-//         data: {
-//           user_message: newMsg,
-//           bot_message: botMessageSaved,
-//           detected_type: finalType,
-//           has_media: !!finalMediaUrl,
-//           has_caption: !!captionOrText,
-//         },
-//       });
-//     } catch (e2) {
-//       await t2.rollback();
-//       console.error("[sendMessage] Bot save error:", e2);
-
-//       return res.json({
-//         success: true,
-//         message: "Message sent (bot reply failed)",
-//         data: {
-//           user_message: newMsg,
-//           bot_message: null,
-//           detected_type: finalType,
-//           has_media: !!finalMediaUrl,
-//           has_caption: !!captionOrText,
-//         },
-//       });
-//     }
-//   } catch (err) {
-//     console.error("sendMessage error:", err);
-//     try {
-//       await t.rollback();
-//     } catch (_) {}
-//     await cleanupTempFiles([req.file]);
-//     return res.status(500).json({ success: false, message: "Server error" });
-//   }
-// }
-
-// ✅ Make sure you import your new model at top of controller file:
-
-async function sendMessage(req, res) {
-  const t = await Message.sequelize.transaction();
-  let newMsg = null;
-
+async function deleteMessage(req, res) {
   try {
-    // Validate params
+    // 1) Validate params
     const paramsSchema = Joi.object({
-      chatId: Joi.number().integer().required(),
+      messageId: Joi.number().integer().positive().required(),
     });
 
-    const { error: pErr, value: pVal } = paramsSchema.validate(
-      { chatId: req.params.chatId },
-      { abortEarly: true }
-    );
-
-    if (pErr) {
-      await t.rollback();
-      return res
-        .status(400)
-        .json({ success: false, message: pErr.details[0].message });
-    }
-
-    //  Validate body (no messageType)
-    const bodySchema = Joi.object({
-      message: Joi.string().allow("", null).optional(),
-      replyToMessageId: Joi.alternatives()
-        .try(Joi.number().integer(), Joi.string().trim().allow(""))
-        .optional()
-        .allow(null),
-    }).unknown(true);
-
-    const { error: bErr, value: bVal } = bodySchema.validate(req.body || {}, {
+    const { error, value } = paramsSchema.validate(req.params, {
       abortEarly: true,
+      convert: true,
       stripUnknown: true,
     });
 
-    if (bErr) {
-      await t.rollback();
-      await cleanupTempFiles([req.file]);
-      return res
-        .status(400)
-        .json({ success: false, message: bErr.details[0].message });
-    }
-
-    const chatId = Number(pVal.chatId);
-    const file = req.file || null;
-
-    // Normalize caption
-    const captionOrText = (bVal.message || "").toString().trim();
-
-    // Normalize replyToMessageId
-    let replyToMessageId = bVal.replyToMessageId;
-    if (typeof replyToMessageId === "string")
-      replyToMessageId = replyToMessageId.trim();
-    if (replyToMessageId === "" || replyToMessageId === undefined)
-      replyToMessageId = null;
-    if (replyToMessageId !== null) replyToMessageId = Number(replyToMessageId);
-    if (replyToMessageId !== null && Number.isNaN(replyToMessageId))
-      replyToMessageId = null;
-
-    // Must have at least text OR file
-    if (!captionOrText && !file) {
-      await t.rollback();
+    if (error) {
       return res.status(400).json({
         success: false,
-        message: "Either message text or a file is required",
+        message: error.details[0].message,
       });
     }
 
-    //Session check
-    const sessionResult = await isUserSessionValid(req);
-    if (!sessionResult.success) {
-      await t.rollback();
-      await cleanupTempFiles([file]);
-      return res.status(401).json(sessionResult);
-    }
-    const userId = Number(sessionResult.data);
+    const messageId = Number(value.messageId);
 
-    //  Load + lock chat (prevents race conditions for unread counters)
-    const chat = await Chat.findByPk(chatId, {
-      transaction: t,
-      lock: t.LOCK.UPDATE,
+    // 2) Validate session
+    const session = await isUserSessionValid(req);
+    if (!session.success) {
+      return res.status(401).json(session);
+    }
+    const userId = Number(session.data);
+
+    // 3) Fetch message (minimal fields)
+    const message = await Message.findByPk(messageId, {
+      attributes: ["id", "chat_id", "sender_id", "status"],
+    });
+
+    if (!message) {
+      return res.status(404).json({
+        success: false,
+        message: "Message not found",
+      });
+    }
+
+    // 4) Idempotency: already deleted
+    if (message.status === "deleted") {
+      return res.json({
+        success: true,
+        message: "Message already deleted",
+      });
+    }
+
+    // 5) Sender-only delete
+    if (message.sender_id !== userId) {
+      return res.status(403).json({
+        success: false,
+        message: "You can only delete your own messages",
+      });
+    }
+
+    // 6) Verify chat membership (extra safety)
+    const chat = await Chat.findByPk(message.chat_id, {
+      attributes: ["id", "participant_1_id", "participant_2_id"],
     });
 
     if (!chat) {
-      await t.rollback();
-      await cleanupTempFiles([file]);
-      return res
-        .status(404)
-        .json({ success: false, message: "Chat not found" });
+      return res.status(404).json({
+        success: false,
+        message: "Chat not found",
+      });
     }
 
-    const isUserP1 = chat.participant_1_id === userId;
-    const isUserP2 = chat.participant_2_id === userId;
-
-    if (!isUserP1 && !isUserP2) {
-      await t.rollback();
-      await cleanupTempFiles([file]);
-      return res
-        .status(403)
-        .json({ success: false, message: "Not in this chat" });
-    }
-
-    const myStatus = isUserP1 ? chat.chat_status_p1 : chat.chat_status_p2;
-    if (myStatus === "blocked") {
-      await t.rollback();
-      await cleanupTempFiles([file]);
+    if (chat.participant_1_id !== userId && chat.participant_2_id !== userId) {
       return res.status(403).json({
         success: false,
-        code: "YOU_BLOCKED_USER",
-        message: "You have blocked this user. Unblock to send messages.",
+        message: "You are not allowed to modify this chat",
       });
     }
 
-    const receiverId = isUserP1 ? chat.participant_2_id : chat.participant_1_id;
-
-    // Mark all incoming messages as read for this user + reset unread count for this user
+    // 7) Soft delete message (normalize content)
     await Message.update(
-      { is_read: true, read_at: new Date(), status: "read" },
       {
-        where: { chat_id: chatId, receiver_id: userId, is_read: false },
-        transaction: t,
-      }
-    );
-
-    if (isUserP1) chat.unread_count_p1 = 0;
-    else chat.unread_count_p2 = 0;
-    await chat.save({ transaction: t });
-
-    // Detect message type automatically by file mimetype
-    let finalType = "text";
-    if (file) {
-      const mt = String(file.mimetype || "").toLowerCase();
-      if (mt.startsWith("image/")) finalType = "image";
-      else if (mt.startsWith("audio/")) finalType = "audio";
-      else if (mt.startsWith("video/")) finalType = "video";
-      else finalType = "file";
-    }
-
-    //  Validate + prepare media
-    let finalMediaUrl = null;
-
-    const maxImageMB = parseInt(await getOption("max_chat_image_mb", 20), 10);
-    const maxAudioMB = parseInt(await getOption("max_chat_audio_mb", 20), 10);
-    const maxVideoMB = parseInt(await getOption("max_chat_video_mb", 50), 10);
-    const maxFileMB = parseInt(await getOption("max_chat_file_mb", 20), 10);
-
-    const sizeLimitBytes = (mb) => Math.max(1, mb) * 1024 * 1024;
-
-    const ensureFile = () => {
-      if (!file) {
-        throw Object.assign(new Error("File is required"), {
-          code: "FILE_REQUIRED",
-        });
-      }
-    };
-
-    if (finalType === "image") {
-      ensureFile();
-
-      if (file.size > sizeLimitBytes(maxImageMB)) {
-        await t.rollback();
-        await cleanupTempFiles([file]);
-        return res.status(400).json({
-          success: false,
-          message: `Image too large (max ${maxImageMB}MB)`,
-        });
-      }
-
-      const detect = await verifyFileType(file, [
-        "image/png",
-        "image/jpeg",
-        "image/webp",
-        "image/heic",
-        "image/heif",
-        "image/jpg",
-      ]);
-
-      if (!detect || !detect.ok) {
-        await t.rollback();
-        await cleanupTempFiles([file]);
-        return res
-          .status(400)
-          .json({ success: false, message: "Invalid image type" });
-      }
-
-      const compressed = await compressImage(file.path, "chat");
-      finalMediaUrl = compressed.filename; // keep same style you already use
-      await cleanupTempFiles([file]);
-    } else if (finalType === "audio") {
-      ensureFile();
-
-      if (file.size > sizeLimitBytes(maxAudioMB)) {
-        await t.rollback();
-        await cleanupTempFiles([file]);
-        return res.status(400).json({
-          success: false,
-          message: `Audio too large (max ${maxAudioMB}MB)`,
-        });
-      }
-
-      const detect = await verifyFileType(file, [
-        "audio/mpeg",
-        "audio/mp3",
-        "audio/mp4",
-        "audio/aac",
-        "audio/ogg",
-        "audio/webm",
-        "audio/wav",
-        "video/webm",
-        "audio/weba",
-      ]);
-
-      if (!detect || !detect.ok) {
-        await t.rollback();
-        await cleanupTempFiles([file]);
-        return res
-          .status(400)
-          .json({ success: false, message: "Invalid audio type" });
-      }
-
-      finalMediaUrl = await moveUploadedFile(file, "chat_audio");
-    } else if (finalType === "video") {
-      ensureFile();
-
-      if (file.size > sizeLimitBytes(maxVideoMB)) {
-        await t.rollback();
-        await cleanupTempFiles([file]);
-        return res.status(400).json({
-          success: false,
-          message: `Video too large (max ${maxVideoMB}MB)`,
-        });
-      }
-
-      const detect = await verifyFileType(file, [
-        "video/mp4",
-        "video/quicktime",
-        "video/webm",
-        "video/3gpp",
-        "video/x-matroska",
-        "video/mkv",
-        "video/avi",
-      ]);
-
-      if (!detect || !detect.ok) {
-        await t.rollback();
-        await cleanupTempFiles([file]);
-        return res
-          .status(400)
-          .json({ success: false, message: "Invalid video type" });
-      }
-
-      finalMediaUrl = await moveUploadedFile(file, "chat_video");
-    } else if (finalType === "file") {
-      ensureFile();
-
-      if (file.size > sizeLimitBytes(maxFileMB)) {
-        await t.rollback();
-        await cleanupTempFiles([file]);
-        return res.status(400).json({
-          success: false,
-          message: `File too large (max ${maxFileMB}MB)`,
-        });
-      }
-
-      const detect = await verifyFileType(file, [
-        "application/pdf",
-        "application/zip",
-        "application/x-zip-compressed",
-        "application/msword",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-      ]);
-
-      if (!detect || !detect.ok) {
-        await t.rollback();
-        await cleanupTempFiles([file]);
-        return res
-          .status(400)
-          .json({ success: false, message: "Invalid file type" });
-      }
-
-      finalMediaUrl = await moveUploadedFile(file, "chat_file");
-    }
-
-    //  Coins logic
-    const optionValue = await getOption("cost_per_message", 10);
-    let messageCost = parseInt(optionValue ?? 0, 10);
-    if (Number.isNaN(messageCost)) messageCost = 0;
-
-    const sender = await User.findByPk(userId, {
-      transaction: t,
-      lock: t.LOCK.UPDATE,
-    });
-
-    if (!sender) {
-      await t.rollback();
-      return res
-        .status(404)
-        .json({ success: false, message: "Sender not found" });
-    }
-
-    if (messageCost > 0 && Number(sender.coins || 0) < messageCost) {
-      await t.rollback();
-      return res.status(400).json({
-        success: false,
-        code: "INSUFFICIENT_COINS",
-        message: "Not enough coins",
-      });
-    }
-
-    //  Reply check (optional, real-world friendly)
-    if (replyToMessageId) {
-      const repliedMessage = await Message.findOne({
-        where: { id: replyToMessageId, chat_id: chat.id },
-        transaction: t,
-      });
-      if (!repliedMessage) replyToMessageId = null;
-    }
-
-    //  Create user message
-    newMsg = await Message.create(
-      {
-        chat_id: chat.id,
-        sender_id: userId,
-        receiver_id: receiverId,
-        message: captionOrText || "",
-
-        message_type: finalType,
-
-        reply_id: replyToMessageId || null,
-
-        sender_type: "real",
-        is_read: false,
-        read_at: null,
-        status: "sent",
-
-        is_paid: messageCost > 0,
-        price: messageCost,
+        status: "deleted",
+        message: "This message was deleted",
+        message_type: "text", // normalize
+        read_at: null, // optional: avoid weird read states
       },
-      { transaction: t }
+      {
+        where: { id: messageId },
+      }
     );
 
-    //  SAVE FILE INFO INTO pb_message_files
-
-    let fileRow = null;
-    if (finalMediaUrl) {
-      fileRow = await MessageFile.create(
-        {
-          chat_id: chat.id,
-          message_id: newMsg.id,
-          sender_id: userId,
-          filename: finalMediaUrl,
-        },
-        { transaction: t }
-      );
-    }
-
-    if (messageCost > 0) {
-      await sender.update(
-        { coins: Number(sender.coins || 0) - messageCost },
-        { transaction: t }
-      );
-
-      await CoinSpentTransaction.create(
-        {
-          user_id: userId,
-          coins: messageCost,
-          spent_on: "message",
-          message_id: newMsg.id,
-          status: "completed",
-        },
-        { transaction: t }
-      );
-    }
-
-    //  Update chat unread
-    const chatUpdate = {
-      last_message_id: newMsg.id,
-      last_message_time: new Date(),
-    };
-
-    if (receiverId === chat.participant_1_id) {
-      chatUpdate.unread_count_p1 = (chat.unread_count_p1 || 0) + 1;
-    } else {
-      chatUpdate.unread_count_p2 = (chat.unread_count_p2 || 0) + 1;
-    }
-
-    await chat.update(chatUpdate, { transaction: t });
-
-    // Decide if receiver is bot
-    const freshReceiver = await User.findByPk(receiverId, { transaction: t });
-    const isBotReceiver = freshReceiver && freshReceiver.type === "bot";
-
-    await t.commit();
-
-    if (!isBotReceiver) {
-      return res.json({
-        success: true,
-        message: "Message sent",
-        data: {
-          user_message: newMsg,
-          user_message_file: fileRow,
-          bot_message: null,
-          detected_type: finalType,
-          has_media: !!finalMediaUrl,
-          has_caption: !!captionOrText,
-        },
-      });
-    }
-
-    const delayMs = 3000;
-    await new Promise((r) => setTimeout(r, delayMs));
-
-    const fallbackMessages = [
-      "Hey! I'm here 🙂",
-      "I was thinking about you just now.",
-      "Tell me more, I'm really curious.",
-      "That sounds interesting, go on 🙂",
-      "You make this chat more fun!",
-    ];
-
-    let botReplyText = null;
-    try {
-      botReplyText = await generateBotReplyForChat(
-        chat.id,
-        captionOrText || ""
-      );
-    } catch (aiErr) {
-      console.error("[sendMessage] AI bot reply error:", aiErr);
-    }
-
-    if (!botReplyText || !botReplyText.toString().trim()) {
-      botReplyText =
-        fallbackMessages[Math.floor(Math.random() * fallbackMessages.length)];
-    }
-
-    const t2 = await Message.sequelize.transaction();
-    try {
-      const botMessageSaved = await Message.create(
-        {
-          chat_id: chat.id,
-          sender_id: receiverId,
-          receiver_id: userId,
-          message: botReplyText,
-          reply_id: newMsg.id,
-          message_type: "text",
-          sender_type: "bot",
-          is_read: false,
-          read_at: null,
-          status: "sent",
-          is_paid: false,
-          price: 0,
-        },
-        { transaction: t2 }
-      );
-
-      const botUpdate = {
-        last_message_id: botMessageSaved.id,
-        last_message_time: new Date(),
-      };
-
-      if (userId === chat.participant_1_id) {
-        botUpdate.unread_count_p1 = Sequelize.literal("unread_count_p1 + 1");
-      } else {
-        botUpdate.unread_count_p2 = Sequelize.literal("unread_count_p2 + 1");
-      }
-
-      await Chat.update(botUpdate, { where: { id: chat.id }, transaction: t2 });
-      await t2.commit();
-
-      return res.json({
-        success: true,
-        message: "Message sent (bot replied)",
-        data: {
-          user_message: newMsg,
-          user_message_file: fileRow,
-          bot_message: botMessageSaved,
-          detected_type: finalType,
-          has_media: !!finalMediaUrl,
-          has_caption: !!captionOrText,
-        },
-      });
-    } catch (e2) {
-      await t2.rollback();
-      console.error("[sendMessage] Bot save error:", e2);
-
-      return res.json({
-        success: true,
-        message: "Message sent (bot reply failed)",
-        data: {
-          user_message: newMsg,
-          user_message_file: fileRow,
-          bot_message: null,
-          detected_type: finalType,
-          has_media: !!finalMediaUrl,
-          has_caption: !!captionOrText,
-        },
-      });
-    }
+    return res.json({
+      success: true,
+      message: "Message deleted successfully",
+      data: {
+        messageId,
+        status: "deleted",
+        message: "This message was deleted",
+      },
+    });
   } catch (err) {
-    console.error("sendMessage error:", err);
-    try {
-      await t.rollback();
-    } catch (_) {}
-    await cleanupTempFiles([req.file]);
-    return res.status(500).json({ success: false, message: "Server error" });
+    console.error("deleteMessage error:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+    });
   }
 }
 
 async function getUserChats(req, res) {
   try {
     const schema = Joi.object({
-      page: Joi.number().integer().default(1),
-      limit: Joi.number().integer().default(20),
-    }).unknown(true);
+      page: Joi.number().integer().min(1).default(1),
+      limit: Joi.number().integer().min(1).max(50).default(20),
+    });
 
-    const { error, value } = schema.validate(req.query, { abortEarly: true });
+    const { error, value } = schema.validate(req.query, {
+      abortEarly: true,
+      convert: true,
+      stripUnknown: true,
+    });
+
     if (error) {
       return res.status(400).json({
         success: false,
@@ -1162,93 +1174,75 @@ async function getUserChats(req, res) {
     if (!session.success) return res.status(401).json(session);
     const userId = Number(session.data);
 
-    const pinOrderLiteral = Sequelize.literal(`
-      CASE
-        WHEN participant_1_id = ${userId} THEN IFNULL(is_pin_p1, 0)
-        ELSE IFNULL(is_pin_p2, 0)
-      END
-    `);
-
-    const { count, rows: chats } = await Chat.findAndCountAll({
+    const { count, rows } = await Chat.findAndCountAll({
       where: {
-        [Op.or]: [
-          { participant_1_id: userId, chat_status_p1: { [Op.ne]: "deleted" } },
-          { participant_2_id: userId, chat_status_p2: { [Op.ne]: "deleted" } },
-        ],
+        participant_2_id: userId,
+        chat_status_p2: "active",
       },
       attributes: [
         "id",
         "participant_1_id",
         "participant_2_id",
-        "is_pin_p1",
         "is_pin_p2",
+        "unread_count_p2",
         "last_message_time",
+        "updated_at",
+      ],
+      include: [
+        {
+          model: User,
+          as: "p1", // bot user
+          attributes: [
+            "id",
+            "username",
+            "avatar",
+            "is_active",
+            "last_active",
+            "bio",
+            "gender",
+            "country",
+          ],
+          required: true,
+        },
+        {
+          model: Message,
+          as: "lastMessage",
+          attributes: ["id", "message", "message_type", "created_at", "status"],
+          required: false,
+        },
       ],
       order: [
-        [pinOrderLiteral, "DESC"],
+        ["is_pin_p2", "DESC"],
+        // Prefer last_message_time if it’s maintained correctly; fallback to updated_at.
+        ["last_message_time", "DESC"],
         ["updated_at", "DESC"],
       ],
       limit,
       offset,
+      distinct: true,
+      subQuery: false,
     });
 
-    const chatList = [];
+    const chatList = rows.map((chat) => {
+      const isP1 = chat.participant_1_id === userId;
+      const otherUser = isP1 ? chat.p2 : chat.p1;
 
-    for (const chat of chats) {
-      const otherUserId =
-        chat.participant_1_id === userId
-          ? chat.participant_2_id
-          : chat.participant_1_id;
+      const isPinned = isP1 ? chat.is_pin_p1 : chat.is_pin_p2;
+      const unread = isP1 ? chat.unread_count_p1 : chat.unread_count_p2;
 
-      const otherUser = await User.findByPk(otherUserId, {
-        attributes: [
-          "id",
-          "username",
-          "avatar",
-          "is_active",
-          "last_active",
-          "bio",
-          "email",
-          "phone",
-          "gender",
-          "country",
-          "dob",
-          "interests",
-          "looking_for",
-          "height",
-          "education",
-        ],
-      });
+      const lastMsg = chat.lastMessage || null;
 
-      const lastMessage = await Message.findOne({
-        where: { chat_id: chat.id, status: { [Op.ne]: "deleted" } },
-        attributes: ["id", "message", "message_type", "created_at"],
-        order: [["id", "DESC"]],
-      });
-
-      const unreadCount = await Message.count({
-        where: {
-          chat_id: chat.id,
-          receiver_id: userId,
-          is_read: false,
-          status: { [Op.ne]: "deleted" },
-        },
-      });
-
-      const isPinnedForUser =
-        chat.participant_1_id === userId ? chat.is_pin_p1 : chat.is_pin_p2;
-      chatList.push({
+      return {
         chat_id: chat.id,
-        user: otherUser,
-        last_message: lastMessage ? lastMessage.message : null,
-        last_message_type: lastMessage ? lastMessage.message_type : null,
+        user: otherUser || null,
+        last_message: lastMsg ? lastMsg.message : null,
+        last_message_type: lastMsg ? lastMsg.message_type : null,
         last_message_time:
-          chat.last_message_time ||
-          (lastMessage ? lastMessage.created_at : null),
-        unread_count: unreadCount,
-        is_pin: !!isPinnedForUser,
-      }); //changes
-    }
+          chat.last_message_time || (lastMsg ? lastMsg.created_at : null),
+        unread_count: Number(unread || 0),
+        is_pin: !!isPinned,
+      };
+    });
 
     return res.json({
       success: true,
@@ -1265,7 +1259,7 @@ async function getUserChats(req, res) {
       },
     });
   } catch (err) {
-    console.error("getUserChats Error:", err);
+    console.error("Error during getUserChats:", err);
     return res.status(500).json({
       success: false,
       message: "Internal server error",
@@ -1274,132 +1268,147 @@ async function getUserChats(req, res) {
 }
 
 async function pinChats(req, res) {
-  const t = await Chat.sequelize.transaction();
-
   try {
-    // Validate body
+    // 1) Validate body early
     const bodySchema = Joi.object({
-      chat_ids: Joi.array().items(Joi.number().integer()).min(1).required(),
-      is_pin: Joi.boolean().required(), // true = pin, false = unpin
+      chat_ids: Joi.array()
+        .items(Joi.number().integer().positive())
+        .min(1)
+        .required(),
+      is_pin: Joi.boolean().required(),
     });
 
-    const { error, value } = bodySchema.validate(req.body);
+    const { error, value } = bodySchema.validate(req.body, {
+      abortEarly: true,
+      convert: true,
+      stripUnknown: true,
+    });
+
     if (error) {
-      await t.rollback();
       return res.status(400).json({
         success: false,
         message: error.details[0].message,
       });
     }
 
-    const { chat_ids, is_pin } = value;
+    // de-dupe ids to avoid extra work + wrong counts
+    const chatIds = [...new Set(value.chat_ids.map(Number))];
+    const isPin = Boolean(value.is_pin);
 
-    // Validate session
+    // 2) Validate session
     const session = await isUserSessionValid(req);
     if (!session.success) {
-      await t.rollback();
       return res.status(401).json(session);
     }
     const userId = Number(session.data);
 
-    if (!Array.isArray(chat_ids) || chat_ids.length === 0) {
-      await t.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "chat_ids must be a non-empty array",
+    // 3) Transaction only for the part that needs consistency
+    const t = await sequelize.transaction();
+    try {
+      // Load chats that belong to user (minimal columns)
+      // Lock rows so pin count + updates are consistent under races
+      const chats = await Chat.findAll({
+        where: {
+          id: { [Op.in]: chatIds },
+          participant_2_id: userId,
+        },
+        attributes: [
+          "id",
+          "participant_1_id",
+          "participant_2_id",
+          "is_pin_p1",
+          "is_pin_p2",
+        ],
+        transaction: t,
+        lock: t.LOCK.UPDATE,
       });
-    }
 
-    // Load all chats that belong to this user
-    const chats = await Chat.findAll({
-      where: {
-        id: { [Op.in]: chat_ids },
-        [Op.or]: [{ participant_1_id: userId }, { participant_2_id: userId }],
-      },
-      attributes: [
-        "id",
-        "participant_1_id",
-        "participant_2_id",
-        "is_pin_p1",
-        "is_pin_p2",
-      ],
-      transaction: t,
-      lock: t.LOCK.UPDATE, // avoid race conditions
-    });
-
-    if (chats.length === 0) {
-      await t.rollback();
-      return res.status(404).json({
-        success: false,
-        message: "No valid chats found for this user",
-      });
-    }
-
-    //  Optional: enforce max pinned chats per user
-    if (is_pin) {
-      const maxPinned = parseInt(await getOption("max_pinned_chats", 100), 100);
-
-      if (Number.isInteger(maxPinned) && maxPinned > 0) {
-        const currentPinnedCount = await Chat.count({
-          where: {
-            [Op.or]: [
-              { participant_1_id: userId, is_pin_p1: true },
-              { participant_2_id: userId, is_pin_p2: true },
-            ],
-          },
-          transaction: t,
+      if (!chats.length) {
+        await t.rollback();
+        return res.status(404).json({
+          success: false,
+          message: "No valid chats found for this user",
         });
+      }
 
-        // how many new pins will be added in this batch
-        const newlyPinCount = chats.filter((chat) => {
-          const isUserP1 = chat.participant_1_id === userId;
-          const alreadyPinned = isUserP1 ? chat.is_pin_p1 : chat.is_pin_p2;
-          return !alreadyPinned;
-        }).length;
+      //enforce max pins
+      if (isPin) {
+        const maxPinnedRaw = await getOption("max_pinned_chats", 100);
+        const maxPinned = Number.parseInt(String(maxPinnedRaw), 10);
 
-        const totalAfter = currentPinnedCount + newlyPinCount;
-
-        if (totalAfter > maxPinned) {
-          const remaining = Math.max(maxPinned - currentPinnedCount, 0);
-          await t.rollback();
-          return res.status(400).json({
-            success: false,
-            message:
-              remaining > 0
-                ? `You can only pin ${remaining} more chats (max ${maxPinned} pinned chats allowed)`
-                : `You already reached the maximum of ${maxPinned} pinned chats`,
+        if (Number.isInteger(maxPinned) && maxPinned > 0) {
+          const currentPinnedCount = await Chat.count({
+            where: { participant_2_id: userId, is_pin_p2: true },
+            transaction: t,
           });
+
+          const newlyPinCount = chats.reduce((acc, chat) => {
+            const isUserP1 = chat.participant_1_id === userId;
+            const alreadyPinned = isUserP1
+              ? !!chat.is_pin_p1
+              : !!chat.is_pin_p2;
+            return acc + (alreadyPinned ? 0 : 1);
+          }, 0);
+
+          const totalAfter = currentPinnedCount + newlyPinCount;
+
+          if (totalAfter > maxPinned) {
+            const remaining = Math.max(maxPinned - currentPinnedCount, 0);
+            await t.rollback();
+            return res.status(400).json({
+              success: false,
+              message:
+                remaining > 0
+                  ? `You can only pin ${remaining} more chats (max ${maxPinned} pinned chats allowed)`
+                  : `You already reached the maximum of ${maxPinned} pinned chats`,
+            });
+          }
         }
       }
+
+      // Bulk update: split into p1 and p2 sets to avoid per-row saves
+      const p1ChatIds = [];
+      const p2ChatIds = [];
+
+      for (const chat of chats) {
+        if (chat.participant_1_id === userId) p1ChatIds.push(chat.id);
+        else if (chat.participant_2_id === userId) p2ChatIds.push(chat.id);
+      }
+
+      if (p1ChatIds.length) {
+        await Chat.update(
+          { is_pin_p1: isPin },
+          { where: { id: { [Op.in]: p1ChatIds } }, transaction: t }
+        );
+      }
+
+      if (p2ChatIds.length) {
+        await Chat.update(
+          { is_pin_p2: isPin },
+          { where: { id: { [Op.in]: p2ChatIds } }, transaction: t }
+        );
+      }
+
+      await t.commit();
+
+      const updatedChatIds = chats.map((c) => c.id);
+
+      return res.json({
+        success: true,
+        message: isPin
+          ? "Chats pinned successfully"
+          : "Chats unpinned successfully",
+        data: {
+          chat_ids: updatedChatIds,
+          is_pin: isPin,
+        },
+      });
+    } catch (e) {
+      await t.rollback();
+      throw e;
     }
-
-    //  Apply pin/unpin to all valid chats
-    const updatedChatIds = [];
-
-    for (const chat of chats) {
-      const isUserP1 = chat.participant_1_id === userId;
-      const pinColumn = isUserP1 ? "is_pin_p1" : "is_pin_p2";
-
-      chat[pinColumn] = is_pin;
-      await chat.save({ transaction: t });
-      updatedChatIds.push(chat.id);
-    }
-
-    await t.commit();
-
-    return res.json({
-      success: true,
-      message: is_pin
-        ? "Chats pinned successfully"
-        : "Chats unpinned successfully",
-      data: {
-        chat_ids: updatedChatIds,
-        is_pin,
-      },
-    });
   } catch (err) {
-    console.error("bulkPinChats Error:", err);
-    await t.rollback();
+    console.error("Error during pinChats:", err);
     return res.status(500).json({
       success: false,
       message: "Internal server error",
@@ -1407,57 +1416,244 @@ async function pinChats(req, res) {
   }
 }
 
-async function deleteMessage(req, res) {
+async function blockChat(req, res) {
   try {
-    const messageId = Number(req.params.messageId);
-    const session = await isUserSessionValid(req);
-    if (!session.success) {
-      return res.status(401).json(session);
+    // 1) Validate params + body early
+    const paramsSchema = Joi.object({
+      chatId: Joi.number().integer().positive().required(),
+    });
+    const { error: pErr, value: pVal } = paramsSchema.validate(req.params, {
+      abortEarly: true,
+      convert: true,
+      stripUnknown: true,
+    });
+    if (pErr) {
+      return res
+        .status(400)
+        .json({ success: false, message: pErr.details[0].message });
     }
-    const userId = Number(session.data);
 
-    if (!messageId) {
+    const bodySchema = Joi.object({
+      action: Joi.string().valid("block", "unblock").default("block"),
+    });
+
+    const { error: bErr, value: bVal } = bodySchema.validate(req.body || {}, {
+      abortEarly: true,
+      convert: true,
+      stripUnknown: true,
+    });
+
+    if (bErr) {
+      return res
+        .status(400)
+        .json({ success: false, message: bErr.details[0].message });
+    }
+
+    const chatId = Number(pVal.chatId);
+    const op = String(bVal.action).toLowerCase();
+    const newStatus = op === "block" ? "blocked" : "active";
+
+    // 2) Validate session
+    const sessionResult = await isUserSessionValid(req);
+    if (!sessionResult.success) {
+      return res.status(401).json(sessionResult);
+    }
+    const userId = Number(sessionResult.data);
+
+    // 3) Short transaction only for the status update (lock row briefly)
+    const t = await sequelize.transaction();
+    try {
+      const chat = await Chat.findByPk(chatId, {
+        transaction: t,
+        lock: t.LOCK.UPDATE,
+        attributes: [
+          "id",
+          "participant_1_id",
+          "participant_2_id",
+          "chat_status_p1",
+          "chat_status_p2",
+        ],
+      });
+
+      if (!chat) {
+        await t.rollback();
+        return res
+          .status(404)
+          .json({ success: false, message: "Chat not found" });
+      }
+
+      const isUserP1 = chat.participant_1_id === userId;
+      const isUserP2 = chat.participant_2_id === userId;
+
+      if (!isUserP1 && !isUserP2) {
+        await t.rollback();
+        return res
+          .status(403)
+          .json({ success: false, message: "You are not part of this chat." });
+      }
+
+      const currentStatus = isUserP1
+        ? chat.chat_status_p1
+        : chat.chat_status_p2;
+
+      // Idempotent: no update needed
+      if (currentStatus === newStatus) {
+        await t.commit();
+        return res.json({
+          success: true,
+          message:
+            op === "block"
+              ? "Chat already blocked."
+              : "Chat already unblocked.",
+          data: {
+            chatId: chat.id,
+            yourStatus: currentStatus,
+            otherStatus: isUserP1 ? chat.chat_status_p2 : chat.chat_status_p1,
+          },
+        });
+      }
+
+      // Update only the right column
+      if (isUserP1) chat.chat_status_p1 = newStatus;
+      else chat.chat_status_p2 = newStatus;
+
+      await chat.save({ transaction: t });
+      await t.commit();
+
+      return res.json({
+        success: true,
+        message:
+          op === "block"
+            ? "Chat blocked successfully."
+            : "Chat unblocked successfully.",
+        data: {
+          chatId: chat.id,
+          yourStatus: isUserP1 ? chat.chat_status_p1 : chat.chat_status_p2,
+          otherStatus: isUserP1 ? chat.chat_status_p2 : chat.chat_status_p1,
+        },
+      });
+    } catch (e) {
+      await t.rollback();
+      throw e;
+    }
+  } catch (error) {
+    console.error("Error during blockChat:", error);
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error" });
+  }
+}
+
+async function deleteChat(req, res) {
+  try {
+    // 1) Validate body early
+    const paramSchema = Joi.object({
+      chat_id: Joi.number().integer().positive().required(),
+    });
+
+    const { error, value } = paramSchema.validate(req.params, {
+      abortEarly: true,
+      convert: true,
+      stripUnknown: true,
+    });
+
+    if (error) {
       return res.status(400).json({
         success: false,
-        message: "messageId is required",
+        message: error.details[0].message,
       });
     }
 
-    const message = await Message.findByPk(messageId);
-    if (!message) {
-      return res.status(404).json({
-        success: false,
-        message: "Message not found",
-      });
+    const chatId = Number(value.chat_id);
+
+    // 2) Session check
+    const sessionResult = await isUserSessionValid(req);
+    if (!sessionResult.success) {
+      return res.status(401).json(sessionResult);
     }
+    const userId = Number(sessionResult.data);
 
-    const chat = await Chat.findByPk(message.chat_id);
-    if (!chat) {
-      return res.status(404).json({
-        success: false,
-        message: "Chat not found",
+    // 3) Short transaction only for the update
+    const t = await sequelize.transaction();
+    try {
+      const chat = await Chat.findByPk(chatId, {
+        transaction: t,
+        lock: t.LOCK.UPDATE,
+        attributes: [
+          "id",
+          "participant_1_id",
+          "participant_2_id",
+          "chat_status_p1",
+          "chat_status_p2",
+          "is_pin_p1",
+          "is_pin_p2",
+          "unread_count_p1",
+          "unread_count_p2",
+        ],
       });
-    }
 
-    // only sender can unsend
-    if (message.sender_id !== userId) {
-      return res.status(403).json({
-        success: false,
-        message: "You can only delete your own messages",
+      if (!chat) {
+        await t.rollback();
+        return res.status(404).json({
+          success: false,
+          message: "Chat not found",
+        });
+      }
+
+      const isUserP1 = chat.participant_1_id === userId;
+      const isUserP2 = chat.participant_2_id === userId;
+
+      if (!isUserP1 && !isUserP2) {
+        await t.rollback();
+        return res.status(403).json({
+          success: false,
+          message: "You are not part of this chat",
+        });
+      }
+
+      // 4) Idempotent + update only your side
+      if (isUserP1) {
+        if (chat.chat_status_p1 === "deleted") {
+          await t.commit();
+          return res.json({
+            success: true,
+            message: "Chat already deleted for you",
+            data: { chatId: chat.id },
+          });
+        }
+
+        chat.chat_status_p1 = "deleted";
+        chat.is_pin_p1 = false;
+        chat.unread_count_p1 = 0;
+      } else {
+        if (chat.chat_status_p2 === "deleted") {
+          await t.commit();
+          return res.json({
+            success: true,
+            message: "Chat already deleted for you",
+            data: { chatId: chat.id },
+          });
+        }
+
+        chat.chat_status_p2 = "deleted";
+        chat.is_pin_p2 = false;
+        chat.unread_count_p2 = 0;
+      }
+
+      await chat.save({ transaction: t });
+      await t.commit();
+
+      return res.json({
+        success: true,
+        message: "Chat deleted for you",
+        data: { chatId: chat.id },
       });
+    } catch (e) {
+      await t.rollback();
+      throw e;
     }
-
-    await message.update({
-      status: "deleted",
-    });
-
-    return res.json({
-      success: true,
-      message: "Message deleted successfully",
-      data: message,
-    });
   } catch (err) {
-    console.error("deleteMessage error:", err);
+    console.error("deleteChat error:", err);
     return res.status(500).json({
       success: false,
       message: "Internal server error",
@@ -1467,14 +1663,16 @@ async function deleteMessage(req, res) {
 
 async function markChatMessagesRead(req, res) {
   try {
+    // 1) Validate body
     const schema = Joi.object({
-      chatId: Joi.number().integer().required(),
-      lastMessageId: Joi.number().integer().optional(),
+      chatId: Joi.number().integer().positive().required(),
+      lastMessageId: Joi.number().integer().positive().optional(),
     });
 
-    const { error, value } = schema.validate(req.body, {
+    const { error, value } = schema.validate(req.body || {}, {
       abortEarly: true,
       convert: true,
+      stripUnknown: true,
     });
 
     if (error) {
@@ -1484,294 +1682,96 @@ async function markChatMessagesRead(req, res) {
       });
     }
 
-    const { chatId, lastMessageId } = value;
+    const chatId = Number(value.chatId);
+    const lastMessageId = value.lastMessageId ? Number(value.lastMessageId) : null;
 
-    const sessionResult = await isUserSessionValid(req);
-    if (!sessionResult.success) return res.status(401).json(sessionResult);
-    const userId = Number(sessionResult.data);
-
-    const chat = await Chat.findByPk(chatId);
-    if (!chat) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Chat not found" });
-    }
-
-    if (chat.participant_1_id !== userId && chat.participant_2_id !== userId) {
-      return res.status(403).json({ success: false, message: "Not allowed" });
-    }
-
-    const where = {
-      chat_id: chatId,
-      receiver_id: userId,
-      is_read: false,
-    };
-
-    if (lastMessageId) where.id = { [Op.lte]: lastMessageId };
-
-    const [updatedCount] = await Message.update(
-      { is_read: true, read_at: new Date(), status: "read" },
-      { where }
-    );
-
-    const remainingUnread = await Message.count({
-      where: { chat_id: chatId, receiver_id: userId, is_read: false },
-    });
-
-    // reset stored count (optional)
-    if (chat.participant_1_id === userId) {
-      await chat.update({ unread_count_p1: remainingUnread });
-    } else {
-      await chat.update({ unread_count_p2: remainingUnread });
-    }
-
-    return res.json({
-      success: true,
-      message: "Messages marked as read",
-      data: {
-        updatedCount,
-        unreadCount: remainingUnread,
-      },
-    });
-  } catch (err) {
-    console.error("markChatMessagesRead error:", err);
-    return res
-      .status(500)
-      .json({ success: false, message: "Internal server error" });
-  }
-}
-
-async function blockChat(req, res) {
-  const transaction = await Chat.sequelize.transaction();
-
-  try {
-    const { chatId: chatIdParam } = req.params;
-    const { action } = req.body || {}; // "block" | "unblock" (optional, default: "block")
-
-    //  Validate session
+    // 2) Validate session
     const sessionResult = await isUserSessionValid(req);
     if (!sessionResult.success) {
-      await transaction.rollback();
       return res.status(401).json(sessionResult);
     }
     const userId = Number(sessionResult.data);
 
-    //  Validate chatId
-    if (!chatIdParam) {
-      await transaction.rollback();
-      return res
-        .status(400)
-        .json({ success: false, message: "chatId is required" });
-    }
-
-    const chatId = Number(chatIdParam);
-    if (!chatId || Number.isNaN(chatId)) {
-      await transaction.rollback();
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid chatId" });
-    }
-
-    //  Load chat with lock (real-life: prevent race conditions)
-    const chat = await Chat.findByPk(chatId, {
-      transaction,
-      lock: transaction.LOCK.UPDATE,
-    });
-
-    if (!chat) {
-      await transaction.rollback();
-      return res
-        .status(404)
-        .json({ success: false, message: "Chat not found" });
-    }
-
-    //  Ensure user is a participant
-    const isUserP1 = chat.participant_1_id === userId;
-    const isUserP2 = chat.participant_2_id === userId;
-
-    if (!isUserP1 && !isUserP2) {
-      await transaction.rollback();
-      return res
-        .status(403)
-        .json({ success: false, message: "You are not part of this chat." });
-    }
-
-    //  Determine operation: block or unblock
-    const op = (action || "block").toLowerCase(); // default: block
-    if (!["block", "unblock"].includes(op)) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid action. Use "block" or "unblock".',
+    // 3) Short transaction to keep unread counters consistent
+    const t = await sequelize.transaction();
+    try {
+      // Lock chat row so unread updates don't race
+      const chat = await Chat.findByPk(chatId, {
+        transaction: t,
+        lock: t.LOCK.UPDATE,
+        attributes: ["id", "participant_1_id", "participant_2_id", "unread_count_p1", "unread_count_p2"],
       });
-    }
 
-    const newStatus = op === "block" ? "blocked" : "active";
-
-    //  Update the current user's chat status
-    if (isUserP1) {
-      if (chat.chat_status_p1 === newStatus) {
-        // idempotent
-        await transaction.commit();
-        return res.json({
-          success: true,
-          message:
-            op === "block"
-              ? "User is already blocked in this chat."
-              : "User is already unblocked in this chat.",
-          data: {
-            chatId: chat.id,
-            yourStatus: chat.chat_status_p1,
-            otherStatus: chat.chat_status_p2,
-          },
-        });
+      if (!chat) {
+        await t.rollback();
+        return res.status(404).json({ success: false, message: "Chat not found" });
       }
 
-      chat.chat_status_p1 = newStatus;
-    } else if (isUserP2) {
-      if (chat.chat_status_p2 === newStatus) {
-        await transaction.commit();
-        return res.json({
-          success: true,
-          message:
-            op === "block"
-              ? "User is already blocked in this chat."
-              : "User is already unblocked in this chat.",
-          data: {
-            chatId: chat.id,
-            yourStatus: chat.chat_status_p2,
-            otherStatus: chat.chat_status_p1,
-          },
-        });
+      const isUserP1 = chat.participant_1_id === userId;
+      const isUserP2 = chat.participant_2_id === userId;
+
+      if (!isUserP1 && !isUserP2) {
+        await t.rollback();
+        return res.status(403).json({ success: false, message: "Not allowed" });
       }
 
-      chat.chat_status_p2 = newStatus;
-    }
+      // 4) Update messages (only receiver's unread, not deleted)
+      const where = {
+        chat_id: chatId,
+        receiver_id: userId,
+        is_read: false,
+        status: { [Op.ne]: "deleted" },
+      };
 
-    await chat.save({ transaction });
-    await transaction.commit();
-
-    return res.json({
-      success: true,
-      message:
-        op === "block"
-          ? "User has been blocked in this chat."
-          : "User has been unblocked in this chat.",
-      data: {
-        chatId: chat.id,
-        yourStatus: isUserP1 ? chat.chat_status_p1 : chat.chat_status_p2,
-        otherStatus: isUserP1 ? chat.chat_status_p2 : chat.chat_status_p1,
-      },
-    });
-  } catch (error) {
-    console.error("[blockChatUser] Error:", error);
-
-    if (transaction && !transaction.finished) {
-      await transaction.rollback();
-    }
-
-    return res
-      .status(500)
-      .json({ success: false, message: "Something went wrong" });
-  }
-}
-
-async function deleteChat(req, res) {
-  const transaction = await Chat.sequelize.transaction();
-
-  try {
-    //body parameter
-    const { chat_id } = req.body;
-
-    // Session check
-    const sessionResult = await isUserSessionValid(req);
-    if (!sessionResult.success) {
-      await transaction.rollback();
-      return res.status(401).json(sessionResult);
-    }
-    const userId = Number(sessionResult.data);
-
-    if (!chat_id) {
-      await transaction.rollback();
-      return res
-        .status(400)
-        .json({ success: false, message: "chatId is required" });
-    }
-
-    const chatId = Number(chat_id);
-    if (!chatId || Number.isNaN(chatId)) {
-      await transaction.rollback();
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid chatId" });
-    }
-
-    const chat = await Chat.findByPk(chatId, {
-      transaction,
-      lock: transaction.LOCK.UPDATE,
-    });
-
-    if (!chat) {
-      await transaction.rollback();
-      return res
-        .status(404)
-        .json({ success: false, message: "Chat not found" });
-    }
-
-    const isUserP1 = chat.participant_1_id === userId;
-    const isUserP2 = chat.participant_2_id === userId;
-
-    if (!isUserP1 && !isUserP2) {
-      await transaction.rollback();
-      return res
-        .status(403)
-        .json({ success: false, message: "You are not part of this chat" });
-    }
-
-    // Mark chat as deleted only for this user
-    if (isUserP1) {
-      if (chat.chat_status_p1 === "deleted") {
-        await transaction.commit();
-        return res.json({
-          success: true,
-          message: "Chat already deleted for you",
-          data: { chatId: chat.id },
-        });
+      if (lastMessageId) {
+        where.id = { [Op.lte]: lastMessageId };
       }
 
-      chat.chat_status_p1 = "deleted";
-      chat.is_pin_p1 = false;
-      chat.unread_count_p1 = 0;
-    } else {
-      if (chat.chat_status_p2 === "deleted") {
-        await transaction.commit();
-        return res.json({
-          success: true,
-          message: "Chat already deleted for you",
-          data: { chatId: chat.id },
-        });
-      }
+      const [updatedCount] = await Message.update(
+        {
+          is_read: true,
+          read_at: new Date(),
+          status: "read",
+        },
+        {
+          where,
+          transaction: t,
+        }
+      );
 
-      chat.chat_status_p2 = "deleted";
-      chat.is_pin_p2 = false;
-      chat.unread_count_p2 = 0;
+      // 5) Compute remaining unread 
+      const remainingUnread = await Message.count({
+        where: {
+          chat_id: chatId,
+          receiver_id: userId,
+          is_read: false,
+          status: { [Op.ne]: "deleted" },
+        },
+        transaction: t,
+      });
+
+      // 6) Sync stored unread counter to remainingUnread
+      if (isUserP1) chat.unread_count_p1 = remainingUnread;
+      else chat.unread_count_p2 = remainingUnread;
+
+      await chat.save({ transaction: t });
+
+      await t.commit();
+
+      return res.json({
+        success: true,
+        message: "Messages marked as read",
+        data: {
+          updatedCount,
+          unreadCount: remainingUnread,
+        },
+      });
+    } catch (e) {
+      await t.rollback();
+      throw e;
     }
-
-    await chat.save({ transaction });
-    await transaction.commit();
-
-    return res.json({
-      success: true,
-      message: "Chat deleted for you",
-      data: {
-        chatId: chat.id,
-      },
-    });
   } catch (err) {
-    console.error("deleteChat error:", err);
-    if (transaction && !transaction.finished) {
-      await transaction.rollback();
-    }
+    console.error("Error during markChatMessagesRead:", err);
     return res.status(500).json({
       success: false,
       message: "Internal server error",
@@ -1782,10 +1782,12 @@ async function deleteChat(req, res) {
 module.exports = {
   sendMessage,
   getChatMessages,
-  getUserChats,
+  getChatMessagesCursor,
   deleteMessage,
-  markChatMessagesRead,
+
+  getUserChats,
   pinChats,
   blockChat,
   deleteChat,
+  markChatMessagesRead,
 };
