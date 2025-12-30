@@ -1,3 +1,5 @@
+require("dotenv").config();
+
 const publicFeedUserAttributes = [
   "id",
   "username",
@@ -73,6 +75,10 @@ const ALLOWED_EXTS = [
   "rtf",
 ];
 
+const PACKAGE_NAME = process.env.ANDROID_PACKAGE_NAME;
+const GOOGLE_PLAY_SERVICE_ACCOUNT_JSON = process.env.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON;
+
+
 module.exports = {
   publicFeedUserAttributes,
   publicUserAttributes,
@@ -81,4 +87,6 @@ module.exports = {
   ALLOWED_MIME,
   fallbackMessages,
   ALLOWED_EXTS,
+  PACKAGE_NAME,
+  GOOGLE_PLAY_SERVICE_ACCOUNT_JSON,
 };
