@@ -250,6 +250,33 @@ const toNullableInt = (v) => {
   return Number.isFinite(n) ? n : null;
 };
 
+function normalizeText(t) {
+  return String(t || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, "")
+    .slice(0, 50);
+}
+
+function getIdempotencyKey(req) {
+  // Client SHOULD send a stable key per ad completion attempt.
+  const k = req.headers["idempotency-key"];
+  if (typeof k === "string") {
+    const v = k.trim();
+    if (v.length >= 8 && v.length <= 128) return v;
+  }
+  // fallback: still helps prevent accidental duplicates within a single flow,
+  // but real idempotency requires client to send a stable key.
+  return crypto.randomUUID();
+}
+
+function getUtcDayRange(date = new Date()) {
+  const start = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 0, 0, 0, 0));
+  const end = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 23, 59, 59, 999));
+  return { start, end };
+}
+
+
 module.exports = {
   getRealIp,
   getOption,
@@ -269,4 +296,7 @@ module.exports = {
   normalizeFiles,
   safeTrim,
   toNullableInt,
+  normalizeText,
+  getIdempotencyKey,
+  getUtcDayRange,
 };

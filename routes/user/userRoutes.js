@@ -306,7 +306,6 @@ router.post("/profile/settings", userController.updateUserSettings);
  */
 router.post("/profile/change-password", userController.changePassword);
 
-
 /**
  * POST /chats/:chatId/send-message
  * ------------------------------------------------------------
@@ -351,7 +350,6 @@ router.post(
  */
 router.get("/chats/:chatId/messages", chatController.getChatMessages);
 
-
 /**
  * GET /chats/:chatId/messages/cursor
  * ------------------------------------------------------------
@@ -366,7 +364,10 @@ router.get("/chats/:chatId/messages", chatController.getChatMessages);
  * - limit (default: 30–50, hard cap recommended)
  *
  */
-router.get("/chats/:chatId/messages/cursor", chatController.getChatMessagesCursor);
+router.get(
+  "/chats/:chatId/messages/cursor",
+  chatController.getChatMessagesCursor
+);
 
 /**
  * POST /chats/:chatId/messages/:messageId/delete
@@ -384,8 +385,11 @@ router.get("/chats/:chatId/messages/cursor", chatController.getChatMessagesCurso
  *   - message text replaced with "This message was deleted"
  * - Removes/ignores media and reply previews for deleted messages.
  * - Operation is idempotent (deleting an already deleted message succeeds).
-*/
-router.post("/chats/:chatId/messages/:messageId/delete", chatController.deleteMessage);
+ */
+router.post(
+  "/chats/:chatId/messages/:messageId/delete",
+  chatController.deleteMessage
+);
 
 /**
  * GET /chats
@@ -408,7 +412,7 @@ router.post("/chats/:chatId/messages/:messageId/delete", chatController.deleteMe
  * - The other participant's safe profile subset (no PII like email/phone).
  * - Last non-deleted message summary.
  * - Unread message count for the current user.
-*/
+ */
 router.get("/chats", chatController.getUserChats);
 
 /**
@@ -448,7 +452,7 @@ router.post("/chats/pin", chatController.pinChats);
  * - Operation is idempotent:
  *   - Blocking an already blocked chat succeeds.
  *   - Unblocking an already active chat succeeds.
-*/
+ */
 router.post("/chats/:chatId/block", chatController.blockChat);
 /**
  * POST /chats/:chatId/delete
@@ -466,7 +470,7 @@ router.post("/chats/:chatId/block", chatController.blockChat);
  *   - unpins the chat for the user
  *   - resets unread count for the user
  * - Operation is idempotent.
-*/
+ */
 router.post("/chats/:chatId/delete", chatController.deleteChat);
 /**
  * POST /chats/:chatId/mark-as-read
@@ -493,8 +497,38 @@ router.post("/chats/:chatId/delete", chatController.deleteChat);
  */
 router.post("/chats/:chatId/mark-as-read", chatController.markChatMessagesRead);
 
-//ads view
+/**
+ * GET /ads/status
+ * ------------------------------------------------------------
+ * Fetches the current rewarded-ads usage status for the
+ * authenticated user for the current day.
+ *
+ * Purpose:
+ * - Allows the client to know whether the user can watch
+ *   more rewarded ads today.
+ * - Used to enable/disable the "Watch Ad" CTA on the frontend.
+ *
+ * Security & Authorization:
+ * - Requires a valid authenticated user session.
+ * - The user identity is derived from the session (not client input).
+ */
 router.get("/ads/status", adsController.getAdStatus);
+/**
+ * POST /ads/complete
+ * ------------------------------------------------------------
+ * Records a completed rewarded-ad view and credits coins
+ * to the authenticated user.
+ *
+ * Purpose:
+ * - Finalizes a rewarded ad watch.
+ * - Safely credits virtual currency (coins) to the user.
+ *
+ * Security & Authorization:
+ * - Requires a valid authenticated session.
+ * - The authenticated user is inferred from the session,
+ *   not from request payload.
+ * - Coin balance updates are performed server-side only.
+ */
 router.post("/ads/complete", adsController.completeAdView);
 
 //video call

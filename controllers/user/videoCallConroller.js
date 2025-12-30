@@ -9,12 +9,6 @@ const CoinSpentTransaction = require("../../models/CoinSpentTransaction");
 const { isUserSessionValid } = require("../../utils/helpers/authHelper");
 const { getOption } = require("../../utils/helper");
 
-// small helper
-function now() {
-  return new Date();
-}
-
-
 async function initiateVideoCall(req, res) {
   const transaction = await VideoCall.sequelize.transaction();
 
