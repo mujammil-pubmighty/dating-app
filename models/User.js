@@ -161,6 +161,15 @@ const User = sequelize.define(
       },
       comment: "0=pending, 1=active, 2=suspended, 3=disabled",
     },
+    is_deleted: {
+      type: DataTypes.TINYINT.UNSIGNED,
+      allowNull: false,
+      defaultValue: 0,
+      validate: {
+        isIn: [[0, 1]],
+      },
+      comment: "0 = active, 1 = deleted",
+    },
   },
 
   {
