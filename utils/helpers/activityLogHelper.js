@@ -40,7 +40,7 @@ async function logActivity(
         entity_id: entityId ?? null,
         ip_address: getIp(req),
         user_agent: getUserAgent(req),
-        metadata: metadata ?? null,
+        metadata: JSON.stringify(metadata) ?? null,
         created_at: new Date(),
       },
       transaction ? { transaction } : undefined

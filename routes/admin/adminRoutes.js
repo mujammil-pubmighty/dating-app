@@ -2,161 +2,472 @@ const router = require("express").Router();
 const authController = require("../../controllers/admin/authController");
 const adminController = require("../../controllers/admin/adminController");
 const { fileUploader } = require("../../utils/helpers/fileUpload");
-const realUserController = require("../../controllers/admin/realUserController");
-const botUserController = require("../../controllers/admin/botUserController");
+const userController = require("../../controllers/admin/userController");
+const botController = require("../../controllers/admin/botController");
 const coinPackageController = require("../../controllers/admin/coinPackageController");
 
 /**
- *  GET /users
+ * GET /users
  * ------------------------------------------------------------
- * Fetches a list of all real users in the system.
+ * Retrieves a paginated list of users in the system.
  *
- * - Accessible by admin only.
- * - Returns both real users and bot users (based on internal logic).
- * - Supports usage in admin dashboards for listing and management.
- * - Does NOT expose sensitive fields such as passwords or tokens.
+ * Purpose:
+ * - Used by admin dashboards to list and manage users.
+ * - Supports filtering, searching, sorting, and pagination.
+ *
+ * Security & Authorization:
+ * - Requires a valid authenticated admin session.
+ * - Admin must have permission to view users.
+ *
+ * Query Parameters (optional):
+ * - page: number (default: 1)
+ * - limit: number (default: 20)
+ * - type: "real" | "bot"
+ * - status: 0 | 1 | 2 | 3
+ * - is_active: boolean
+ * - is_verified: boolean
+ * - search: string (username / email search)
+ * - sortBy: string
+ * - sortOrder: "asc" | "desc"
+ *
+ * Behavior:
+ * - Excludes soft-deleted users by default.
+ * - Does not expose sensitive fields such as passwords or tokens.
+ * - Returns paginated results with metadata.
  */
-router.get("/users", realUserController.getAllUsers);
+router.get("/users", userController.getUsers);
 
 /**
- *  GET /real/:userId
+ * GET /users/:userId
  * ------------------------------------------------------------
- * Fetches a single real user's complete profile by user ID.
+ * Retrieves full profile details of a single user by ID.
  *
- * - Used by admin to view detailed information of a real user.
- * - Returns profile data such as name, bio, interests, status, etc.
- * - Ensures the user belongs to real (human) users category.
- * - Does NOT expose sensitive authentication-related fields.
+ * Purpose:
+ * - Used by admin to view detailed user information.
+ * - Supports inspection of profile data and associated media.
+ *
+ * Security & Authorization:
+ * - Requires a valid authenticated admin session.
+ * - Admin must have permission to view user details.
+ *
+ * Path Parameters:
+ * - userId: number (required)
+ *
+ * Behavior:
+ * - Validates the user ID.
+ * - Returns 404 if the user does not exist or is deleted.
+ * - Excludes sensitive fields such as password and tokens.
+ * - May include related user media/files.
+ * - Does not modify or mutate any data.
  */
-router.get("/real/:userId", realUserController.getUserById);
+router.get("/users/:userId", userController.getUser);
 
 /**
- *  POST /real
+ * POST /users/add
  * ------------------------------------------------------------
- * Creates a new real (human) user manually.
+ * Creates a new real (human) user manually by an admin.
  *
- * - Used by admin to add verified or system-created users.
- * - Accepts profile details such as username, email, gender, etc.
- * - Automatically handles default settings and initial values.
- * - Passwords are securely hashed before storage.
- */
-router.post("/real", realUserController.addRealUser);
-
-/**
- *  POST /real/:userId
- * ------------------------------------------------------------
- * Updates an existing real user's profile.
+ * Purpose:
+ * - Allows admins to onboard users directly from the admin panel.
+ * - Useful for verified, internal, or system-created accounts.
  *
- * - Allows admin to modify user profile details.
- * - Can update fields like name, bio, status, interests, and media.
- * - Validates user existence before applying updates.
- * - Does NOT allow direct password or token manipulation.
- */
-router.post("/real/:userId", realUserController.updateRealUserProfile);
-
-/**
- *  POST /real/:userId/media
- * ------------------------------------------------------------
- * Uploads media files for a real user.
+ * Security & Authorization:
+ * - Requires a valid authenticated admin session.
+ * - Admin must have permission to create users.
  *
- * - Supports multiple uploads (images/videos).
- * - Files are associated with the real user's profile.
- * - Enforces file count and type limits.
+ * Request Body:
+ * - username: string (required)
+ * - password: string (required)
+ * - email: string (optional, required if phone not provided)
+ * - phone: string (optional, required if email not provided)
+ * - All other profile fields are optional.
+ *
+ * Behavior:
+ * - Enforces unique username, email, and phone.
+ * - Password is securely hashed before storage.
+ * - Applies default values defined in the User model.
+ * - Creates associated user settings if missing.
+ * - Logs admin activity for auditing.
+ *
+ * Notes:
+ * - Soft-deleted users still reserve their email/username.
+ * - This endpoint creates only real users, not bots.
  */
 router.post(
-  "/real/:userId/media",
-  fileUploader.array("files", 5),
-  realUserController.uploadUserMedia
-);
-
-/**
- *  POST /real/delete/:userId
- * ------------------------------------------------------------
- * Deletes or deactivates a real user account.
- *
- * - Used by admin for moderation or compliance purposes.
- * - Can permanently delete or soft-delete based on implementation.
- * - Ensures related data is handled safely.
- * - Action is logged for audit and security tracking.
- */
-router.post("/real/delete/:userId", realUserController.deleteRealUser);
-
-/**
- *  GET /bots
- * ------------------------------------------------------------
- * Fetches a list of all bot users.
- *
- * - Used in admin panel to manage AI/bot profiles.
- * - Returns bot-specific users only.
- * - Useful for monitoring engagement and bot activity.
- */
-router.get("/bots", botUserController.getAllUsers);
-
-/**
- *  GET /bot/:userId
- * ------------------------------------------------------------
- * Fetches a specific bot user's profile by user ID.
- *
- * - Used by admin to view or debug bot profiles.
- * - Returns bot-related metadata and profile details.
- * - Ensures the user belongs to the bot category.
- */
-router.get("/bot/:userId", botUserController.getBotUserById);
-
-/**
- *  POST /bot
- * ------------------------------------------------------------
- * Creates a new bot user.
- *
- * - Used to add AI-powered or system-generated profiles.
- * - Accepts bot configuration such as name, gender, avatar, and behavior.
- * - Automatically marks the user as a bot internally.
- */
-router.post(
-  "/bot",
+  "/users/add",
   fileUploader.single("avatar"),
-  botUserController.addBotUser
+  userController.addUser
 );
 
 /**
- *  POST /bot/:userId
+ * POST /users/:userId
  * ------------------------------------------------------------
- * Updates an existing bot user's profile.
+ * Updates an existing user's data.
  *
- * - Allows admin to modify bot attributes and personality data.
- * - Can update images, bio, interaction logic, or visibility.
- * - Validates bot existence before updating.
+ * Purpose:
+ * - Allows admins to edit user profile and administrative fields.
+ * - Supports partial (PATCH-like) updates.
+ *
+ * Security & Authorization:
+ * - Requires a valid authenticated admin session.
+ * - Admin must have permission to edit users.
+ *
+ * Path Parameters:
+ * - userId: number (required)
+ *
+ * Request Body (optional fields):
+ * - Profile fields (name, gender, bio, interests, etc.)
+ * - Account flags (is_active, is_verified, status)
+ * - Credentials (password — will be re-hashed)
+ *
+ * Behavior:
+ * - Only updates fields explicitly provided.
+ * - Prevents removal of both email and phone.
+ * - Enforces uniqueness on username/email/phone.
+ * - Supports password updates with hashing.
+ * - Does not expose sensitive fields in response.
+ * - Logs admin activity with changed fields.
  */
 router.post(
-  "/bot/:userId",
+  "/users/:userId",
   fileUploader.single("avatar"),
-  botUserController.updateBotUserProfile
+  userController.editUser
 );
 
 /**
- *  POST /bot/:userId/media
+ * POST /users/:userId/media
  * ------------------------------------------------------------
- * Uploads media files for a bot user.
+ * Replaces all profile media for a user.
  *
- * - Used to manage bot avatars, galleries, or media assets.
- * - Supports multiple file uploads.
+ * Purpose:
+ * - Allows admins to manage and replace user profile media.
+ * - Used for moderation, verification, or profile correction.
+ *
+ * Security & Authorization:
+ * - Requires a valid authenticated admin session.
+ * - Admin must have permission to manage user media.
+ *
+ * Path Parameters:
+ * - userId: number (required)
+ *
+ * Multipart Form Data:
+ * - files[]: array of files (required)
+ *
+ * Behavior:
+ * - Validates user existence and type.
+ * - Replaces all existing media with new uploads.
+ * - Enforces a maximum number of files.
+ * - Validates file types before upload.
+ * - Deletes old media from storage and database.
+ * - Uploads new media and stores metadata.
+ * - Logs admin activity for auditing.
+ *
+ * Notes:
+ * - This is a replace-all operation, not incremental.
+ * - Storage cleanup is performed on failures where possible.
  */
 router.post(
-  "/bot/:userId/media",
-  fileUploader.array("files", 5),
-  botUserController.uploadBotMedia
+  "/users/:userId/media",
+  fileUploader.array("media", 10),
+  userController.uploadUserMedia
 );
 
 /**
- *  POST /bot/delete/:userId
+ * POST /users/:userId/delete
  * ------------------------------------------------------------
- * Deletes or disables a bot user.
+ * Soft deletes a user account.
  *
- * - Used when a bot is outdated, misbehaving, or no longer required.
- * - Ensures bot removal does not affect real user data.
- * - Action is logged for system integrity and audit purposes.
+ * Purpose:
+ * - Disables a user without permanently removing data.
+ * - Preserves history, media, and references.
+ *
+ * Security & Authorization:
+ * - Requires a valid authenticated admin session.
+ * - Admin must have permission to delete users.
+ *
+ * Path Parameters:
+ * - userId: number (required)
+ *
+ * Behavior:
+ * - Marks the user as deleted (is_deleted = 1).
+ * - Disables the account (is_active = false, status = disabled).
+ * - Prevents future logins and usage.
+ * - Does not remove database records or files.
+ * - Logs admin activity for auditing.
+ *
+ * Notes:
+ * - Soft-deleted users still reserve their email and username.
  */
-router.post("/bot/delete/:userId", botUserController.deleteBotUser);
+router.post("/users/:userId/delete", userController.deleteUser);
+
+/**
+ * POST /users/:userId/restore
+ * ------------------------------------------------------------
+ * Restores a previously soft-deleted user account.
+ *
+ * Purpose:
+ * - Re-enables access to a user account that was soft deleted.
+ * - Used when deletion was accidental or temporary.
+ *
+ * Security & Authorization:
+ * - Requires a valid authenticated admin session.
+ * - Admin must have permission to restore users.
+ *
+ * Path Parameters:
+ * - userId: number (required)
+ *
+ * Behavior:
+ * - Validates the user exists and is currently deleted.
+ * - Restores the user to active state.
+ * - Re-enables login and usage.
+ * - Preserves original profile data and media.
+ * - Logs admin activity for auditing.
+ *
+ * Notes:
+ * - Email and username are preserved from deletion.
+ * - Restore does not reset password or profile fields.
+ */
+router.post("/users/:userId/restore", userController.restoreUser);
+
+/**
+ * GET /bots
+ * ------------------------------------------------------------
+ * Retrieves a paginated list of bot users in the system.
+ *
+ * Purpose:
+ * - Used by admin dashboards to list and manage bot accounts.
+ * - Supports filtering, searching, sorting, and pagination.
+ *
+ * Security & Authorization:
+ * - Requires a valid authenticated admin session.
+ * - Admin must have permission to view bot users.
+ *
+ * Query Parameters (optional):
+ * - page: number (default: 1)
+ * - status: 0 | 1 | 2 | 3
+ * - is_active: boolean ("true"/"false")
+ * - is_verified: boolean ("true"/"false")
+ * - username: string (prefix search)
+ * - email: string (prefix search)
+ * - phone: string (prefix search)
+ * - full_name: string (prefix search)
+ * - country: string (prefix search)
+ * - gender: "male" | "female" | "other" | "prefer_not_to_say"
+ * - register_type: "gmail" | "manual"
+ * - include_deleted: boolean (default: false)
+ * - sortBy: "created_at" | "updated_at" | "username" | "email" | "status" | "last_active" | "coins" | "total_spent"
+ * - sortOrder: "asc" | "desc"
+ *
+ * Behavior:
+ * - Returns only bot users (type = "bot").
+ * - Excludes soft-deleted bots by default unless include_deleted=true.
+ * - Does not expose sensitive fields such as passwords or tokens.
+ * - Returns paginated results with metadata.
+ */
+router.get("/bots", botController.getBots);
+
+/**
+ * GET /bots/:userId
+ * ------------------------------------------------------------
+ * Retrieves full profile details of a single bot user by ID.
+ *
+ * Purpose:
+ * - Used by admins to view detailed bot profile information.
+ * - Supports inspection of profile fields and associated media/files.
+ *
+ * Security & Authorization:
+ * - Requires a valid authenticated admin session.
+ * - Admin must have permission to view bot details.
+ *
+ * Path Parameters:
+ * - userId: number (required)
+ *
+ * Behavior:
+ * - Validates the userId.
+ * - Returns 404 if the bot does not exist (or is soft-deleted, depending on controller policy).
+ * - Ensures the target user is a bot (type = "bot").
+ * - Excludes sensitive fields such as password.
+ * - May include related bot media/files.
+ * - Does not modify or mutate any data.
+ */
+router.get("/bots/:userId", botController.getBot);
+
+/**
+ * POST /bots/add
+ * ------------------------------------------------------------
+ * Creates a new bot user manually by an admin.
+ *
+ * Purpose:
+ * - Allows admins to create bot accounts for seeding, testing, AI bots, or moderation workflows.
+ * - Creates a bot profile with optional avatar and profile fields.
+ *
+ * Security & Authorization:
+ * - Requires a valid authenticated admin session.
+ * - Admin must have permission to create bot users.
+ *
+ * Multipart Form Data:
+ * - avatar: file (optional)
+ *
+ * Request Body:
+ * - username: string (required)
+ * - password: string (required)
+ * - email: string (optional, required if phone not provided)
+ * - phone: string (optional, required if email not provided)
+ * - All other profile fields are optional (bio, interests, etc.)
+ *
+ * Behavior:
+ * - Ensures the new user is created as type = "bot".
+ * - Enforces unique username/email/phone among non-deleted accounts.
+ * - Password is securely hashed before storage.
+ * - Creates associated user settings if missing.
+ * - Stores avatar if provided and valid.
+ * - Logs admin activity for auditing.
+ *
+ * Notes:
+ * - Soft-deleted users still reserve their email/username/phone.
+ * - This endpoint creates only bots, not real users.
+ */
+router.post(
+  "/bots/add",
+  fileUploader.single("avatar"),
+  botController.addBot
+);
+
+/**
+ * POST /bots/:userId
+ * ------------------------------------------------------------
+ * Updates an existing bot user's data.
+ *
+ * Purpose:
+ * - Allows admins to edit bot profile fields and administrative flags.
+ * - Supports partial (PATCH-like) updates.
+ *
+ * Security & Authorization:
+ * - Requires a valid authenticated admin session.
+ * - Admin must have permission to edit bot users.
+ *
+ * Path Parameters:
+ * - userId: number (required)
+ *
+ * Multipart Form Data:
+ * - avatar: file (optional)
+ *
+ * Request Body (optional fields):
+ * - Profile fields (full_name, gender, bio, interests, etc.)
+ * - Account flags (is_active, is_verified, status)
+ * - Credentials (password — will be re-hashed)
+ *
+ * Behavior:
+ * - Only updates fields explicitly provided.
+ * - Ensures the target user is a bot (type = "bot").
+ * - Prevents removing both email and phone (must keep at least one).
+ * - Enforces uniqueness on username/email/phone when changed.
+ * - Supports password updates with hashing.
+ * - Does not expose sensitive fields in response.
+ * - Logs admin activity with changed fields.
+ *
+ * Notes:
+ * - This endpoint must NOT allow changing type from bot to real.
+ */
+router.post(
+  "/bots/:userId",
+  fileUploader.single("avatar"),
+  botController.editBot
+);
+
+/**
+ * POST /bots/:userId/media
+ * ------------------------------------------------------------
+ * Replaces all profile media for a bot user.
+ *
+ * Purpose:
+ * - Allows admins to manage and replace bot profile media.
+ * - Used for profile setup, moderation, or bot persona updates.
+ *
+ * Security & Authorization:
+ * - Requires a valid authenticated admin session.
+ * - Admin must have permission to manage bot media.
+ *
+ * Path Parameters:
+ * - userId: number (required)
+ *
+ * Multipart Form Data:
+ * - media[]: array of files (required)
+ *
+ * Behavior:
+ * - Validates bot existence and ensures type = "bot".
+ * - Replaces all existing media with new uploads (replace-all operation).
+ * - Enforces a maximum number of files via server configuration.
+ * - Validates file types before upload.
+ * - Deletes old media from storage and database.
+ * - Uploads new media and stores metadata.
+ * - Logs admin activity for auditing.
+ *
+ * Notes:
+ * - This is a replace-all operation, not incremental.
+ * - Storage cleanup is performed on failures where possible.
+ */
+router.post(
+  "/bots/:userId/media",
+  fileUploader.array("media", 10),
+  botController.uploadBotMedia
+);
+
+/**
+ * POST /bots/:userId/delete
+ * ------------------------------------------------------------
+ * Soft deletes a bot user account.
+ *
+ * Purpose:
+ * - Disables a bot user without permanently removing data.
+ * - Preserves history, media, and references for auditing.
+ *
+ * Security & Authorization:
+ * - Requires a valid authenticated admin session.
+ * - Admin must have permission to delete bot users.
+ *
+ * Path Parameters:
+ * - userId: number (required)
+ *
+ * Behavior:
+ * - Validates the bot exists and is not already deleted.
+ * - Marks the bot as deleted (is_deleted = 1).
+ * - Disables the account (is_active = false, status = disabled).
+ * - Does not remove database records or files.
+ * - Logs admin activity for auditing.
+ *
+ * Notes:
+ * - Soft-deleted bots still reserve their email and username.
+ */
+router.post("/bots/:userId/delete", botController.deleteBot);
+
+/**
+ * POST /bots/:userId/restore
+ * ------------------------------------------------------------
+ * Restores a previously soft-deleted bot user account.
+ *
+ * Purpose:
+ * - Re-enables access to a bot account that was soft deleted.
+ * - Used when deletion was accidental or temporary.
+ *
+ * Security & Authorization:
+ * - Requires a valid authenticated admin session.
+ * - Admin must have permission to restore bot users.
+ *
+ * Path Parameters:
+ * - userId: number (required)
+ *
+ * Behavior:
+ * - Validates the bot exists and is currently deleted.
+ * - Restores the bot to active state (is_deleted = 0, is_active = true, status = active).
+ * - Preserves original profile data and media.
+ * - Ensures associated user settings exist.
+ * - Logs admin activity for auditing.
+ *
+ * Notes:
+ * - Restore does not reset password or profile fields.
+ */
+router.post("/bots/:userId/restore", botController.restoreBot);
 
 /**
  * GET /coin-packages
@@ -345,19 +656,6 @@ router.post(
   coinPackageController.deleteCoinPackage
 );
 
-
-router.post(
-  "/real/:userId/media",
-  fileUploader.array("files", 5),
-  realUserController.uploadUserMedia
-);
-
-router.post(
-  "/bot/:userId/media",
-  fileUploader.array("files", 5),
-  botUserController.uploadBotMedia
-);
-
 router.post("/login", authController.adminLogin);
 router.post("/login/verify", authController.verifyAdminLogin);
 router.post("/resend-send-otp", authController.sendOTPAgain);
@@ -367,9 +665,7 @@ router.post("/forgot-password/verify", authController.verifyForgotPassword);
 // admins
 router.get("/admins", adminController.getAdmins);
 router.post("/add", fileUploader.single("avtar"), adminController.addAdmin);
-
 router.post("/:id", fileUploader.single("avtar"), adminController.editAdmin);
-
 router.get("/:id", adminController.getAdminById);
 
 module.exports = router;

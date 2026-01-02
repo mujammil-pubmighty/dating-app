@@ -184,6 +184,7 @@ const User = sequelize.define(
         fields: ["type", "is_active", "gender", "created_at"],
       },
       { name: "idx_is_active", fields: ["is_active"] },
+      { name: "idx_type_status", fields: ["type", "status"] },
       { name: "idx_created_at", fields: ["created_at"] },
     ],
   }

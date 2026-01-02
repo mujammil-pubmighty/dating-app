@@ -41,6 +41,8 @@ async function run() {
 
     await set("max_pages_admin", 1000);
     await set("coin_packages_per_page", 10);
+    await set("users_per_page_admin", 10);
+    await set("bots_per_page_admin", 10);
 
     console.log("Options inserted/verified");
     process.exit(0);

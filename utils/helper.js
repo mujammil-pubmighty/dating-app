@@ -315,44 +315,59 @@ function ceilDiv(a, b) {
   return Math.floor((A + B - 1) / B); // all int math
 }
 
- const toMoney = (v) => {
-      if (v === "" || v == null) return null;
-      const n = Number(v);
-      if (!Number.isFinite(n)) return null;
-      // round to 2 decimals safely
-      return Math.round(n * 100) / 100;
-    };
+const toMoney = (v) => {
+  if (v === "" || v == null) return null;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  // round to 2 decimals safely
+  return Math.round(n * 100) / 100;
+};
 
-    const computeFinalPrice = (price, discountType, discountValue) => {
-      const p = toMoney(price);
-      const d = toMoney(discountValue) ?? 0;
+const computeFinalPrice = (price, discountType, discountValue) => {
+  const p = toMoney(price);
+  const d = toMoney(discountValue) ?? 0;
 
-      if (p == null || p < 0) return { ok: false, msg: "price must be a valid number >= 0" };
-      if (d < 0) return { ok: false, msg: "discount_value must be >= 0" };
+  if (p == null || p < 0)
+    return { ok: false, msg: "price must be a valid number >= 0" };
+  if (d < 0) return { ok: false, msg: "discount_value must be >= 0" };
 
-      if (discountType === "percentage") {
-        if (d > 100) return { ok: false, msg: "discount_value must be between 0 and 100 for percentage" };
-        const final = toMoney(p - (p * d) / 100);
-        return { ok: true, final_price: final < 0 ? 0 : final };
-      }
+  if (discountType === "percentage") {
+    if (d > 100)
+      return {
+        ok: false,
+        msg: "discount_value must be between 0 and 100 for percentage",
+      };
+    const final = toMoney(p - (p * d) / 100);
+    return { ok: true, final_price: final < 0 ? 0 : final };
+  }
 
-      if (discountType === "flat") {
-        if (d > p) return { ok: false, msg: "discount_value cannot exceed price for flat discount" };
-        const final = toMoney(p - d);
-        return { ok: true, final_price: final < 0 ? 0 : final };
-      }
+  if (discountType === "flat") {
+    if (d > p)
+      return {
+        ok: false,
+        msg: "discount_value cannot exceed price for flat discount",
+      };
+    const final = toMoney(p - d);
+    return { ok: true, final_price: final < 0 ? 0 : final };
+  }
 
-      return { ok: false, msg: "Invalid discount_type" };
-    };
+  return { ok: false, msg: "Invalid discount_type" };
+};
 
-       const parseBool = (v) => {
-      if (v === true || v === false) return v;
-      const s = String(v).trim().toLowerCase();
-      if (s === "true" || s === "1") return true;
-      if (s === "false" || s === "0") return false;
-      return null;
-    };
+const parseBool = (v) => {
+  if (v === true || v === false) return v;
+  const s = String(v).trim().toLowerCase();
+  if (s === "true" || s === "1") return true;
+  if (s === "false" || s === "0") return false;
+  return null;
+};
 
+function escapeLike(input) {
+  // Escape %, _ and backslash for SQL LIKE
+  // We'll use Op.like with ESCAPE behavior (Sequelize handles it for most dialects),
+  // but escaping still prevents unintended wildcard expansion.
+  return String(input).replace(/[\\%_]/g, (m) => `\\${m}`);
+}
 module.exports = {
   getRealIp,
   getOption,
@@ -378,6 +393,8 @@ module.exports = {
   toInt,
   ceilDiv,
   clampInt,
-  computeFinalPrice, toMoney,
-  parseBool
+  computeFinalPrice,
+  toMoney,
+  parseBool,
+  escapeLike,
 };
