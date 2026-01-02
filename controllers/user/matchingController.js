@@ -424,7 +424,6 @@ async function getUserMatches(req, res) {
       });
     }
 
-    // match => is_mutual=1, like => is_mutual=0 (based on your likeUser logic)
     const where =
       action === "like"
         ? { user_id: currentUserId, action: "like", is_mutual: 0 }
@@ -453,6 +452,39 @@ async function getUserMatches(req, res) {
       limit,
       offset,
     });
+    
+    let items = result.rows;
+
+    if (action !== "like") {
+      items = await Promise.all(
+        result.rows.map(async (row) => {
+          const plain = row.toJSON();
+
+          const targetUserId = plain?.targetUser?.id;
+          let chatId = null;
+
+          if (targetUserId) {
+            const chat = await getOrCreateChatBetweenUsers(
+              currentUserId,
+              targetUserId,
+              null // no transaction here
+            );
+            chatId = chat?.id || null;
+          }
+
+          return {
+            ...plain,
+            chat_id: chatId,
+          };
+        })
+      );
+    } else {
+      // likes list => chat_id is null
+      items = result.rows.map((row) => {
+        const plain = row.toJSON();
+        return { ...plain, chat_id: null };
+      });
+    }
 
     const totalItems = result.count;
     const totalPages = Math.ceil(totalItems / limit);
@@ -461,7 +493,7 @@ async function getUserMatches(req, res) {
       success: true,
       message: "Fetched successfully.",
       data: {
-        items: result.rows,
+        items,
         pagination: {
           page,
           limit,

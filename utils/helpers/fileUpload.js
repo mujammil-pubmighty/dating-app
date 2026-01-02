@@ -397,7 +397,7 @@ async function uploadFile(
         user_agent,
       });
     }
-
+    
     return {
       filename,
       folder,
