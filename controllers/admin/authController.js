@@ -4,7 +4,7 @@ const { captchaVerification } = require("../../utils/helpers/captchaHelper");
 const {
   getOption,
   verifyTwoFAToken,
-  generateOtpExpiration,
+
   getLocation,
   getRealIp,
   noReplyMail,
@@ -13,8 +13,6 @@ const {
   isValidEmail,
   generateOtp,
   handleAdminSessionCreation,
-  isAdminSessionValid,
-  detectSuspiciousAdminLogin,
 } = require("../../utils/helpers/authHelper");
 const Admin = require("../../models/Admin/Admin");
 const sequelize = require("../../config/db");
@@ -441,7 +439,7 @@ async function sendOTPAgain(req, res) {
 
     // Generate OTP for 2FA
     const otp = generateOtp();
-    const otpExpiration = generateOtpExpiration(admin_otp_valid_minutes);
+    const otpExpiresAt = new Date(Date.now() + otpValidMinutes * 60 * 1000);
 
     // Destroy all otps
 
@@ -449,7 +447,7 @@ async function sendOTPAgain(req, res) {
     await AdminOTP.create({
       admin_id: user.id,
       otp: otp,
-      expiry: otpExpiration,
+      expiry: otpExpiresAt,
       action: action,
       status: 0,
     });
@@ -541,13 +539,13 @@ async function forgotAdminPassword(req, res) {
 
     // Generate OTP for 2FA
     const otp = generateOtp();
-    const otpExpiration = generateOtpExpiration(admin_otp_valid_minutes);
+    const otpExpiresAt = new Date(Date.now() + otpValidMinutes * 60 * 1000);
 
     // Save new admin otp
     await AdminOTP.create({
       admin_id: user.id,
       otp: otp,
-      expiry: otpExpiration,
+      expiry: otpExpiresAt,
       action: "forgot_password",
     });
 

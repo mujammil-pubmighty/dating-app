@@ -271,8 +271,28 @@ function getIdempotencyKey(req) {
 }
 
 function getUtcDayRange(date = new Date()) {
-  const start = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 0, 0, 0, 0));
-  const end = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 23, 59, 59, 999));
+  const start = new Date(
+    Date.UTC(
+      date.getUTCFullYear(),
+      date.getUTCMonth(),
+      date.getUTCDate(),
+      0,
+      0,
+      0,
+      0
+    )
+  );
+  const end = new Date(
+    Date.UTC(
+      date.getUTCFullYear(),
+      date.getUTCMonth(),
+      date.getUTCDate(),
+      23,
+      59,
+      59,
+      999
+    )
+  );
   return { start, end };
 }
 
@@ -281,7 +301,7 @@ function toInt(v, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 
-function clampInt(v, min, max, fallback=0) {
+function clampInt(v, min, max, fallback = 0) {
   const n = toInt(v, fallback);
   if (n < min) return min;
   if (n > max) return max;
@@ -293,10 +313,6 @@ function ceilDiv(a, b) {
   const A = clampInt(a, 0);
   const B = clampInt(b, 1);
   return Math.floor((A + B - 1) / B); // all int math
-}
-
-function generateOtpExpiration(time) {
-  return new Date(Date.now() + time * 60 * 1000); // 10 minutes from now
 }
 
 async function verifyTwoFAToken(user, token) {
@@ -368,7 +384,7 @@ module.exports = {
   toInt,
   ceilDiv,
   clampInt,
-  generateOtpExpiration,
+
   noReplyMail,
   verifyTwoFAToken,
   verifyAdminRole,

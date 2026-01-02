@@ -19,14 +19,14 @@ async function addAdmin(req, res) {
       username: Joi.string().max(150).trim().required(),
       email: Joi.string().email().max(255).trim().required(),
       password: Joi.string().min(8).max(255).required(),
-
+      first_name: Joi.string().allow("", null).max(100).optional(),
+      last_name: Joi.string().allow("", null).max(100).optional(),
       role: Joi.string()
         .valid("superAdmin", "staff", "paymentManager", "support")
         .default("staff"),
 
       status: Joi.number().integer().valid(0, 1, 2, 3).default(1),
 
-      // NEW: unified 2FA field (0=off,1=app,2=email)
       twoFactorEnabled: Joi.number().integer().valid(0, 1, 2).default(0),
     });
 
@@ -119,6 +119,8 @@ async function addAdmin(req, res) {
       username: value.username,
       email: value.email,
       password: value.password,
+      first_name: (value.first_name || "").trim() || null,
+      last_name: (value.last_name || "").trim() || null,
       role: value.role,
       status: value.status,
       avtar: value.avatar ?? null,
@@ -155,7 +157,6 @@ async function addAdmin(req, res) {
   }
 }
 
-
 async function editAdmin(req, res) {
   try {
     const { error: pErr, value: p } = Joi.object({
@@ -186,7 +187,6 @@ async function editAdmin(req, res) {
     if (!admin)
       return res.status(404).json({ success: false, msg: "Admin not found" });
 
- 
     const schema = Joi.object({
       username: Joi.string().max(150).trim(),
       email: Joi.string().email().max(255).trim(),
@@ -271,14 +271,16 @@ async function editAdmin(req, res) {
           .status(400)
           .json({ success: false, msg: "Invalid file type" });
 
-      const stored = await uploadFile(req.file, "upload/admin",
+      const stored = await uploadFile(
+        req.file,
+        "upload/admin",
 
-         null,
-  req.ip,
-  req.headers["user-agent"],
-  admin.id,          // or session admin id
-  "normal",          // IMPORTANT
-  null               // IMPORTANT
+        null,
+        req.ip,
+        req.headers["user-agent"],
+        admin.id, // or session admin id
+        "normal", // IMPORTANT
+        null // IMPORTANT
       );
       if (admin.avtar) await deleteFile(admin.avtar, "upload/admin");
       payload.avtar = stored.filename;
@@ -393,7 +395,6 @@ async function getAdmins(req, res) {
       limit,
     });
 
-  
     const mapped = rows.map((r) => {
       const j = r.toJSON();
       j.twoFactorEnabled = Number(j.two_fa || 0);
