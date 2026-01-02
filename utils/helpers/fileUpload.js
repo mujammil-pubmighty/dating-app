@@ -38,7 +38,13 @@ async function uploadImage(file, folder) {
 
   // Unique safe name
   const filename = `PM-${Date.now()}-${Math.round(Math.random() * 1e9)}.webp`;
-  const uploadPath = path.resolve(__dirname, "../../", "public", folder, filename);
+  const uploadPath = path.resolve(
+    __dirname,
+    "../../",
+    "public",
+    folder,
+    filename
+  );
 
   try {
     // Ensure directory exists
@@ -157,7 +163,7 @@ async function uploadFile(
   uploader_ip = null,
   user_agent = null,
   user_id = null,
-  recordType = "chat",
+  recordType = "normal",
   message = null
 ) {
   if (!file || !file.path) throw new Error("Missing file");
@@ -328,27 +334,63 @@ async function uploadFile(
 
     let fileUpload = { id: null };
 
+    // if (recordType === "chat") {
+    //   fileUpload = await MessageFile.create({
+    //     chat_id: message.chat_id,
+    //     message_id: message.id,
+    //     sender_id: user_id,
+    //     name: filename,
+    //     folders: folder,
+    //     size: finalSize, // bytes
+    //     file_type: outputExt, // helpful for querying
+    //     mime_type: finalMime,
+    //     user_id,
+    //     uploader_ip,
+    //     user_agent,
+    //   });
+    // } else {
+    //   // Persist upload record (FIXED FIELDS)
+    //   fileUpload = await FileUpload.create({
+    //     name: filename,
+    //     folders: folder,
+    //     size: finalSize, // bytes
+    //     file_type: outputExt, // helpful for querying
+    //     mime_type: finalMime,
+    //     user_id,
+    //     uploader_ip,
+    //     user_agent,
+    //   });
+    // }
+
     if (recordType === "chat") {
+      if (!message || !message.chat_id || !message.id) {
+        try {
+          await safeRemove(finalPath);
+        } catch {}
+        throw new Error(
+          "uploadFile(recordType='chat') requires valid message { chat_id, id }"
+        );
+      }
+
       fileUpload = await MessageFile.create({
         chat_id: message.chat_id,
         message_id: message.id,
         sender_id: user_id,
         name: filename,
         folders: folder,
-        size: finalSize, // bytes
-        file_type: outputExt, // helpful for querying
+        size: finalSize,
+        file_type: outputExt,
         mime_type: finalMime,
         user_id,
         uploader_ip,
         user_agent,
       });
     } else {
-      // Persist upload record (FIXED FIELDS)
       fileUpload = await FileUpload.create({
         name: filename,
         folders: folder,
-        size: finalSize, // bytes
-        file_type: outputExt, // helpful for querying
+        size: finalSize,
+        file_type: outputExt,
         mime_type: finalMime,
         user_id,
         uploader_ip,
@@ -384,7 +426,13 @@ async function deleteFile(fileName, folder, id = null, recordType = "chat") {
     if (!fileName || !folder) return false;
 
     // Full absolute path to file
-    const filePath = path.resolve(__dirname, "../../", "public", folder, fileName);
+    const filePath = path.resolve(
+      __dirname,
+      "../../",
+      "public",
+      folder,
+      fileName
+    );
 
     // Check existence
     const exists = await fs.pathExists(filePath);
